@@ -173,7 +173,7 @@ class CSVParser:
             'CustomerName': ['customer_name', 'customername', 'customer name', 'name', 'customer'],
             'CustomerEmail': ['customer_email', 'customeremail', 'customer email', 'email'],
             'SaleOrderNumber': ['sale_order_number', 'saleordernumber', 'sale order number', 'order_number', 'order number', 'order', 'order_id', 'orderid'],
-            'InvoiceNumber': ['invoice_number', 'invoicenumber', 'invoice number', 'invoice', 'invoice_id', 'invoiceid'],
+            'InvoiceNumber': ['invoice_number', 'invoicenumber', 'invoice number', 'invoice #', 'invoice#', 'invoice', 'invoice_id', 'invoiceid'],
             'CustomerReference': ['customer_reference', 'customerreference', 'customer reference', 'reference', 'ref', 'po_number', 'po number', 'po'],
             'SaleDate': ['sale_date', 'saledate', 'sale date', 'date', 'order_date', 'order date'],
             'Status': ['status', 'order_status', 'order status'],
@@ -196,8 +196,11 @@ class CSVParser:
             matches = []
             for col in all_columns:
                 col_lower = col.lower().strip()
+                # Normalize column name for comparison (remove special chars, normalize spaces)
+                col_normalized = col_lower.replace('_', ' ').replace('-', ' ').replace('#', '').strip()
                 for possible_name in possible_names:
-                    if col_lower == possible_name.lower() or col_lower.replace('_', ' ').replace('-', ' ') == possible_name.lower():
+                    possible_normalized = possible_name.lower().replace('_', ' ').replace('-', ' ').replace('#', '').strip()
+                    if col_lower == possible_name.lower() or col_normalized == possible_normalized:
                         matches.append(col)
                         break
             
@@ -235,39 +238,63 @@ class CSVParser:
             return value
     
     def _parse_date(self, value: str, date_format: str) -> Optional[str]:
-        """Parse date string according to format"""
+        """
+        Parse date string and convert to YYYY-MM-DD format.
+        
+        Supports multiple date formats including:
+        - YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY
+        - MM/DD/YY (e.g., 12/17/25 -> 2025-12-17)
+        - Various other common formats
+        
+        Args:
+            value: Date string to parse
+            date_format: Optional format hint (currently unused, formats are auto-detected)
+        
+        Returns:
+            Date string in YYYY-MM-DD format, or None if parsing fails
+        """
         if not value:
             return None
         
-        # Common date formats
+        value = value.strip()
+        
+        # Common date formats (ordered by most common first)
         formats = [
-            '%Y-%m-%d',      # YYYY-MM-DD
+            '%Y-%m-%d',      # YYYY-MM-DD (ISO format)
             '%m/%d/%Y',      # MM/DD/YYYY
+            '%m/%d/%y',      # MM/DD/YY (e.g., 12/17/25)
             '%d/%m/%Y',      # DD/MM/YYYY
+            '%d/%m/%y',      # DD/MM/YY
             '%Y/%m/%d',      # YYYY/MM/DD
             '%d-%m-%Y',      # DD-MM-YYYY
             '%m-%d-%Y',      # MM-DD-YYYY
+            '%m-%d-%y',      # MM-DD-YY
+            '%d-%m-%y',      # DD-MM-YY
             '%d-%b-%y',      # DD-MMM-YY (e.g., 17-Nov-25)
             '%d-%b-%Y',      # DD-MMM-YYYY (e.g., 17-Nov-2025)
             '%d %b %y',      # DD MMM YY (e.g., 17 Nov 25)
             '%d %b %Y',      # DD MMM YYYY (e.g., 17 Nov 2025)
+            '%b %d, %Y',     # MMM DD, YYYY (e.g., Nov 17, 2025)
+            '%B %d, %Y',     # MMMM DD, YYYY (e.g., November 17, 2025)
         ]
         
         # Try to parse with common formats
         for fmt in formats:
             try:
                 dt = datetime.strptime(value, fmt)
-                # Handle 2-digit years - assume years 00-30 are 2000-2030, 31-99 are 1931-1999
+                # Handle 2-digit years - assume years 00-50 are 2000-2050, 51-99 are 1951-1999
                 if fmt.endswith('%y'):  # 2-digit year format
                     # strptime with %y gives years 00-99 as 1900-1999
-                    # We want: 00-30 -> 2000-2030, 31-99 -> 1931-1999
+                    # We want: 00-50 -> 2000-2050, 51-99 -> 1951-1999
                     if dt.year >= 1900 and dt.year <= 1999:
                         two_digit_year = dt.year % 100
-                        if two_digit_year <= 30:
-                            # 00-30 -> 2000-2030
+                        if two_digit_year <= 50:
+                            # 00-50 -> 2000-2050
                             dt = dt.replace(year=2000 + two_digit_year)
-                        # else 31-99 stays as 1931-1999
-                return dt.strftime('%Y-%m-%d')  # Return in ISO format
+                        # else 51-99 stays as 1951-1999 (already correct from strptime)
+                
+                # Always return in YYYY-MM-DD format
+                return dt.strftime('%Y-%m-%d')
             except ValueError:
                 continue
         

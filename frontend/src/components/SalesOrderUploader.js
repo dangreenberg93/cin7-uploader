@@ -498,6 +498,19 @@ const SalesOrderUploader = ({ user }) => {
               </div>
             ) : (
               <>
+                {payloads.customer_creation && (
+                  <div className="mb-4">
+                    <h6 className="text-xs font-semibold mb-2 text-blue-700">Customer Creation Payload (Before Step 1)</h6>
+                    <div className="border rounded-md overflow-hidden bg-blue-50">
+                      <pre className="p-4 text-xs font-mono overflow-auto max-h-96 bg-white">
+                        <code>{JSON.stringify(payloads.customer_creation, null, 2)}</code>
+                      </pre>
+                                    <p className="p-2 text-xs text-blue-700 bg-blue-100">
+                                      This customer will be created first. The Sale payload will reference the CustomerID returned from the customer creation, along with the Customer name.
+                                    </p>
+                    </div>
+                  </div>
+                )}
                 {salePayload && (
                   <div className="mb-4">
                     <h6 className="text-xs font-semibold mb-2 text-gray-700">Sale Payload (Step 1)</h6>
@@ -521,7 +534,9 @@ const SalesOrderUploader = ({ user }) => {
               </>
             )}
             <div className="mt-2 text-xs text-muted-foreground">
-              These are the JSON payloads that will be sent to Cin7 API. First the Sale is created, then the Sale Order is created with the Sale ID.
+              {payloads.customer_creation 
+                ? 'These are the JSON payloads that will be sent to Cin7 API. First the customer will be created, then the Sale will reference the returned CustomerID and Customer name, then the Sale Order will be created.'
+                : 'These are the JSON payloads that will be sent to Cin7 API. First the Sale is created, then the Sale Order is created with the Sale ID.'}
             </div>
           </>
         )}
@@ -690,14 +705,18 @@ const SalesOrderUploader = ({ user }) => {
     { value: 'CustomerName', label: 'Customer Name (Lookup)', required: true },
     { value: 'CustomerReference', label: 'Customer Reference (PO)', required: true },
     { value: 'SaleDate', label: 'Sale Date', required: true },
+    { value: 'ShipBy', label: 'Required By / Due Date', required: false },
+    { value: 'ShippingAddress', label: 'Ship To Address', required: false },
     { value: 'Currency', label: 'Currency', required: false },
     { value: 'TaxInclusive', label: 'Tax Inclusive', required: false },
     { value: 'SKU', label: 'Product SKU (Item Code)', required: true },
-    { value: 'Quantity', label: 'Quantity', required: false },
-    { value: 'Price', label: 'Price', required: true },
+    { value: 'Quantity', label: 'Quantity (Cases)', required: false },
+    { value: 'Total', label: 'Total', required: false },
+    { value: 'Price', label: 'Price (or calculate from Total ÷ Cases)', required: false },
     { value: 'Discount', label: 'Discount', required: false },
     { value: 'Tax', label: 'Tax', required: false },
-    { value: 'Notes', label: 'Notes', required: false }
+    { value: 'Notes', label: 'Notes', required: false },
+    { value: 'AdditionalAttribute1', label: 'Additional Attribute 1 (Customer)', required: false }
   ];
 
   return (
@@ -893,32 +912,39 @@ const SalesOrderUploader = ({ user }) => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {cin7Fields.map(field => (
-                        <TableRow key={field.value}>
-                          <TableCell>
-                            <div className="flex items-center gap-2">
-                              {field.label}
-                              {field.required && (
-                                <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 border-amber-300">Required</Badge>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <Select
-                              value={(() => {
-                                const mappedValue = columnMapping[field.value];
-                                if (!mappedValue || String(mappedValue).trim() === '') {
-                                  return undefined;
-                                }
-                                const trimmed = String(mappedValue).trim();
-                                return trimmed.length > 0 ? trimmed : undefined;
-                              })()}
-                              onValueChange={(value) => {
-                                const newMapping = {
-                                  ...columnMapping,
-                                  [field.value]: value === '__none__' ? '' : value
-                                };
-                                setColumnMapping(newMapping);
+                      {cin7Fields.map(field => {
+                        const hasQuantity = columnMapping['Quantity'] && columnMapping['Quantity'].trim() !== '';
+                        const hasTotal = columnMapping['Total'] && columnMapping['Total'].trim() !== '';
+                        const hasPrice = columnMapping['Price'] && columnMapping['Price'].trim() !== '';
+                        const showCalculationNote = field.value === 'Price' && hasQuantity && hasTotal && !hasPrice;
+                        
+                        return (
+                          <React.Fragment key={field.value}>
+                            <TableRow>
+                              <TableCell>
+                                <div className="flex items-center gap-2">
+                                  {field.label}
+                                  {field.required && (
+                                    <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 border-amber-300">Required</Badge>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <Select
+                                  value={(() => {
+                                    const mappedValue = columnMapping[field.value];
+                                    if (!mappedValue || String(mappedValue).trim() === '') {
+                                      return undefined;
+                                    }
+                                    const trimmed = String(mappedValue).trim();
+                                    return trimmed.length > 0 ? trimmed : undefined;
+                                  })()}
+                                  onValueChange={(value) => {
+                                    const newMapping = {
+                                      ...columnMapping,
+                                      [field.value]: value === '__none__' ? '' : value
+                                    };
+                                    setColumnMapping(newMapping);
                                 
                                 // Debounced auto-save mapping when changed (if session exists)
                                 // Clear any pending auto-save
@@ -961,7 +987,23 @@ const SalesOrderUploader = ({ user }) => {
                           </Select>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      {showCalculationNote && (
+                        <TableRow>
+                          <TableCell colSpan={2} className="text-xs text-muted-foreground italic pl-12">
+                            Price will be calculated from {columnMapping['Total']} ÷ {columnMapping['Quantity']} if Price is not mapped
+                          </TableCell>
+                        </TableRow>
+                      )}
+                      {field.value === 'Price' && !hasPrice && (
+                        <TableRow>
+                          <TableCell colSpan={2} className="text-xs text-muted-foreground pl-12">
+                            Optional: Map directly or leave empty to calculate from Total ÷ Quantity (Cases)
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </React.Fragment>
+                    );
+                  })}
                   </TableBody>
                 </Table>
                 </div>
@@ -1001,30 +1043,54 @@ const SalesOrderUploader = ({ user }) => {
             <div className="border rounded-md">
                   <Table className="border-0">
                     <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-20">Row</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead>Errors</TableHead>
-                        <TableHead className="w-20"></TableHead>
+                      <TableRow className="h-8">
+                        <TableHead className="py-1 text-xs font-semibold">PO #</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Customer</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Order Date</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Due Date</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Lines</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Cases</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Total</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Status</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold">Errors</TableHead>
+                        <TableHead className="py-1 text-xs font-semibold"></TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {validationResults.invalidRows.map((row) => (
                         <React.Fragment key={row.row_number}>
-                          <TableRow>
-                            <TableCell className="font-medium">
-                              {row.row_number}
+                          <TableRow className="h-8">
+                            <TableCell className="text-xs py-1">
+                              {row.po_number || '-'}
                             </TableCell>
-                            <TableCell>
-                              <Badge variant="destructive">
-                                <XCircle className="h-3 w-3 mr-1" />
+                            <TableCell className="text-xs py-1">
+                              {row.customer_name || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.order_date || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.due_date || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.line_item_count || 0}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.total_cases ? row.total_cases.toFixed(2) : '0.00'}
+                            </TableCell>
+                            <TableCell className="text-xs font-medium py-1">
+                              {row.order_total ? `$${row.order_total.toFixed(2)}` : '$0.00'}
+                            </TableCell>
+                            <TableCell className="py-1">
+                              <Badge variant="destructive" className="text-xs h-5 px-1.5">
+                                <XCircle className="h-2.5 w-2.5 mr-0.5" />
                                 Invalid
                               </Badge>
                             </TableCell>
-                            <TableCell>
-                              <div className="space-y-1">
+                            <TableCell className="py-1">
+                              <div className="space-y-0.5">
                                 {row.errors?.map((error, eIdx) => (
-                                  <div key={eIdx} className="text-xs text-destructive">
+                                  <div key={eIdx} className="text-xs text-destructive leading-tight">
                                     {error}
                                   </div>
                                 ))}
@@ -1044,17 +1110,18 @@ const SalesOrderUploader = ({ user }) => {
                                     <Button
                                       variant="ghost"
                                       size="sm"
+                                      className="h-6 w-6 p-0"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         setOpenPayloadModal(row.row_number);
                                       }}
                                     >
-                                      <Code2 className="h-4 w-4" />
+                                      <Code2 className="h-3.5 w-3.5" />
                                     </Button>
                                     <Dialog open={openPayloadModal === row.row_number} onOpenChange={(open) => {
                                       if (!open) setOpenPayloadModal(null);
                                     }}>
-                                      <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+                                      <DialogContent className="max-w-6xl max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
                                         <DialogHeader>
                                           <DialogTitle>Cin7 API Payload</DialogTitle>
                                         </DialogHeader>
@@ -1065,6 +1132,19 @@ const SalesOrderUploader = ({ user }) => {
                                             </div>
                                           ) : (
                                             <>
+                                              {row.preview_payload?.customer_creation && (
+                                                <div className="mb-4">
+                                                  <h6 className="text-sm font-semibold mb-2 text-blue-700">Customer Creation Payload (Before Step 1)</h6>
+                                                  <div className="border rounded-md overflow-hidden bg-blue-50">
+                                                    <pre className="p-4 text-xs font-mono overflow-auto max-h-96 bg-white">
+                                                      <code>{JSON.stringify(row.preview_payload.customer_creation, null, 2)}</code>
+                                                    </pre>
+                                    <p className="p-2 text-xs text-blue-700 bg-blue-100">
+                                      This customer will be created first. The Sale payload will reference the CustomerID returned from the customer creation, along with the Customer name.
+                                    </p>
+                                                  </div>
+                                                </div>
+                                              )}
                                               {row.preview_payload?.sale && (
                                                 <div>
                                                   <h6 className="text-sm font-semibold mb-2 text-gray-700">Sale Payload (Step 1)</h6>
@@ -1109,8 +1189,8 @@ const SalesOrderUploader = ({ user }) => {
                           </TableRow>
                           {expandedRows.has(row.row_number) && (
                             <TableRow>
-                              <TableCell colSpan={4} className="bg-gray-50/50 p-6">
-                                <div className="space-y-5">
+                              <TableCell colSpan={10} className="bg-gray-50/50 p-3">
+                                <div className="space-y-3">
                                   {renderJsonPayload(row)}
                                   {renderPreparedData(row)}
                                 </div>
@@ -1121,44 +1201,60 @@ const SalesOrderUploader = ({ user }) => {
                       ))}
                       {validationResults.validRows?.map((row) => (
                         <React.Fragment key={row.row_number}>
-                          <TableRow>
-                            <TableCell className="font-medium">
-                              {row.row_number}
+                          <TableRow className="h-8">
+                            <TableCell className="text-xs py-1">
+                              {row.po_number || '-'}
                             </TableCell>
-                            <TableCell>
-                              <Badge variant="default" className="bg-green-600">
-                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                            <TableCell className="text-xs py-1">
+                              {row.customer_name || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.order_date || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.due_date || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.line_item_count || 0}
+                            </TableCell>
+                            <TableCell className="text-xs py-1">
+                              {row.total_cases ? row.total_cases.toFixed(2) : '0.00'}
+                            </TableCell>
+                            <TableCell className="text-xs font-medium py-1">
+                              {row.order_total ? `$${row.order_total.toFixed(2)}` : '$0.00'}
+                            </TableCell>
+                            <TableCell className="py-1">
+                              <Badge variant="default" className="bg-green-600 text-xs h-5 px-1.5">
+                                <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />
                                 Valid
                               </Badge>
                             </TableCell>
-                            <TableCell>
+                            <TableCell className="py-1">
                               <span className="text-xs text-muted-foreground">No errors</span>
                             </TableCell>
-                            <TableCell>
+                            <TableCell className="py-1">
                               <div className="flex items-center gap-2">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
+                                <button
+                                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline cursor-pointer"
                                   onClick={() => toggleRowExpansion(row.row_number)}
                                 >
                                   {expandedRows.has(row.row_number) ? 'Hide' : 'Show'}
-                                </Button>
+                                </button>
                                 {isAdmin && row.preview_payload && (
                                   <>
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
+                                    <button
+                                      className="text-xs text-blue-600 hover:text-blue-800 hover:underline cursor-pointer"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         setOpenPayloadModal(row.row_number);
                                       }}
                                     >
-                                      <Code2 className="h-4 w-4" />
-                                    </Button>
+                                      <Code2 className="h-3.5 w-3.5 inline" />
+                                    </button>
                                     <Dialog open={openPayloadModal === row.row_number} onOpenChange={(open) => {
                                       if (!open) setOpenPayloadModal(null);
                                     }}>
-                                      <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+                                      <DialogContent className="max-w-6xl max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
                                         <DialogHeader>
                                           <DialogTitle>Cin7 API Payload</DialogTitle>
                                         </DialogHeader>
@@ -1169,6 +1265,19 @@ const SalesOrderUploader = ({ user }) => {
                                             </div>
                                           ) : (
                                             <>
+                                              {row.preview_payload?.customer_creation && (
+                                                <div className="mb-4">
+                                                  <h6 className="text-sm font-semibold mb-2 text-blue-700">Customer Creation Payload (Before Step 1)</h6>
+                                                  <div className="border rounded-md overflow-hidden bg-blue-50">
+                                                    <pre className="p-4 text-xs font-mono overflow-auto max-h-96 bg-white">
+                                                      <code>{JSON.stringify(row.preview_payload.customer_creation, null, 2)}</code>
+                                                    </pre>
+                                    <p className="p-2 text-xs text-blue-700 bg-blue-100">
+                                      This customer will be created first. The Sale payload will reference the CustomerID returned from the customer creation, along with the Customer name.
+                                    </p>
+                                                  </div>
+                                                </div>
+                                              )}
                                               {row.preview_payload?.sale && (
                                                 <div>
                                                   <h6 className="text-sm font-semibold mb-2 text-gray-700">Sale Payload (Step 1)</h6>
@@ -1213,7 +1322,7 @@ const SalesOrderUploader = ({ user }) => {
                           </TableRow>
                           {expandedRows.has(row.row_number) && (
                             <TableRow>
-                              <TableCell colSpan={4} className="bg-gray-50/50 p-6">
+                              <TableCell colSpan={10} className="bg-gray-50/50 p-3">
                                 <div className="space-y-5">
                                   {renderJsonPayload(row)}
                                   {renderPreparedData(row)}
@@ -1226,7 +1335,7 @@ const SalesOrderUploader = ({ user }) => {
                     </TableBody>
                     <tfoot>
                       <TableRow>
-                        <TableCell colSpan={4} className="border-t bg-gray-50/50 py-2">
+                        <TableCell colSpan={10} className="border-t bg-gray-50/50 py-2">
                           <div className="text-xs text-muted-foreground">
                             Valid: <span className="font-semibold text-black">{validationResults.validCount}</span> Invalid: <span className="font-semibold text-red-600">{validationResults.invalidCount}</span>
                           </div>

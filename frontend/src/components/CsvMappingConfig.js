@@ -29,13 +29,17 @@ const CsvMappingConfig = () => {
     { value: 'CustomerName', label: 'Customer Name (Lookup)', category: 'Customer' },
     { value: 'CustomerReference', label: 'Customer Reference (PO)', category: 'Order' },
     { value: 'SaleDate', label: 'Sale Date', category: 'Order' },
+    { value: 'ShipBy', label: 'Required By / Due Date', category: 'Order' },
+    { value: 'ShippingAddress', label: 'Ship To Address', category: 'Order' },
     { value: 'Currency', label: 'Currency', category: 'Order' },
     { value: 'TaxInclusive', label: 'Tax Inclusive', category: 'Order' },
     { value: 'SKU', label: 'Product SKU (Item Code)', category: 'Line Item' },
-    { value: 'Quantity', label: 'Quantity', category: 'Line Item' },
-    { value: 'Price', label: 'Price', category: 'Line Item' },
+    { value: 'Quantity', label: 'Quantity (Cases)', category: 'Line Item' },
+    { value: 'Total', label: 'Total', category: 'Line Item', isCalculationField: true },
+    { value: 'Price', label: 'Price', category: 'Line Item', isCalculationField: true },
     { value: 'Discount', label: 'Discount', category: 'Line Item' },
     { value: 'Tax', label: 'Tax', category: 'Line Item' },
+    { value: 'AdditionalAttribute1', label: 'Additional Attribute 1 (Customer)', category: 'Customer' },
   ];
 
   useEffect(() => {
@@ -309,17 +313,36 @@ const CsvMappingConfig = () => {
                 <div key={category} className="space-y-2">
                   <h4 className="text-xs font-semibold text-muted-foreground">{category}</h4>
                   <div className="space-y-2 pl-4">
-                    {groupedFields[category].map((field) => (
-                      <div key={field.value} className="flex items-center gap-2">
-                        <Label className="w-48 text-xs">{field.label}:</Label>
-                        <Input
-                          className="flex-1 h-8 text-xs"
-                          placeholder="Enter CSV column name"
-                          value={columnMapping[field.value] || ''}
-                          onChange={(e) => handleColumnMappingChange(field.value, e.target.value)}
-                        />
-                      </div>
-                    ))}
+                    {groupedFields[category].map((field) => {
+                      const hasQuantity = columnMapping['Quantity'] && columnMapping['Quantity'].trim() !== '';
+                      const hasTotal = columnMapping['Total'] && columnMapping['Total'].trim() !== '';
+                      const hasPrice = columnMapping['Price'] && columnMapping['Price'].trim() !== '';
+                      const showCalculationNote = field.value === 'Price' && hasQuantity && hasTotal && !hasPrice;
+                      
+                      return (
+                        <div key={field.value} className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <Label className="w-48 text-xs">{field.label}:</Label>
+                            <Input
+                              className="flex-1 h-8 text-xs"
+                              placeholder="Enter CSV column name (leave empty to calculate)"
+                              value={columnMapping[field.value] || ''}
+                              onChange={(e) => handleColumnMappingChange(field.value, e.target.value)}
+                            />
+                          </div>
+                          {showCalculationNote && (
+                            <p className="text-xs text-muted-foreground pl-52 italic">
+                              Price will be calculated from {columnMapping['Total']} ÷ {columnMapping['Quantity']} if Price is not mapped
+                            </p>
+                          )}
+                          {field.value === 'Price' && !hasPrice && (
+                            <p className="text-xs text-muted-foreground pl-52">
+                              Optional: Map directly or leave empty to calculate from Total ÷ Quantity (Cases)
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ))}

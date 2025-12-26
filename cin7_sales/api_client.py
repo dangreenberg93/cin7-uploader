@@ -656,6 +656,513 @@ class Cin7SalesAPI:
                 )
             return None
     
+    def get_accounts(self) -> List[Dict[str, Any]]:
+        """
+        Get all accounts from Cin7.
+        
+        Returns:
+            List of account dictionaries
+        """
+        # Store debug info on instance for access by caller (similar to locations)
+        self._last_account_response = None
+        self._last_account_raw_data = None
+        
+        self._rate_limit()
+        base = self.base_url.rstrip('/')
+        url = f"{base}/ref/account"
+        endpoint = "/ref/account"
+        method = "GET"
+        params = {
+            'Page': 1,
+            'Limit': 100
+        }
+        start_time = time.time()
+        
+        import sys
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"DEBUG get_accounts: Making API call to {url}", file=sys.stderr)
+        print(f"DEBUG get_accounts: Method: {method}", file=sys.stderr)
+        
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            response_body = None
+            error_message = None
+            try:
+                response_body = response.json() if response.content else None
+            except:
+                response_body = response.text[:1000] if response.text else None
+            
+            if response.status_code != 200:
+                error_message = f"HTTP {response.status_code}: {response.text[:200] if response.text else 'Unknown error'}"
+            
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=response.status_code,
+                    response_body=response_body,
+                    error_message=error_message,
+                    duration_ms=duration_ms
+                )
+            
+            if response.status_code == 200:
+                data = response_body if response_body else {}
+                
+                # Store for debugging (similar to locations)
+                self._last_account_response = {
+                    'status': response.status_code,
+                    'data_type': str(type(data)),
+                    'data': data,
+                    'is_list': isinstance(data, list),
+                    'is_dict': isinstance(data, dict),
+                    'keys': list(data.keys()) if isinstance(data, dict) else None,
+                    'raw_text': response.text[:1000] if hasattr(response, 'text') and response.text else None
+                }
+                self._last_account_raw_data = data
+                
+                # Check for HTML error page
+                if isinstance(data, str) and '<!DOCTYPE html>' in data:
+                    import sys
+                    print(f"DEBUG get_accounts: Received HTML error page", file=sys.stderr)
+                    print(f"{'='*60}\n", file=sys.stderr)
+                    return []
+                
+                # Debug: print response structure (similar to locations)
+                import sys
+                raw_response_text = response.text[:500] if hasattr(response, 'text') else None
+                print(f"DEBUG get_accounts: Response status 200, data type: {type(data)}", file=sys.stderr)
+                print(f"DEBUG get_accounts: Response data: {data}", file=sys.stderr)
+                print(f"DEBUG get_accounts: Raw response text (first 500 chars): {raw_response_text}", file=sys.stderr)
+                print(f"DEBUG get_accounts: Response data keys (if dict): {list(data.keys()) if isinstance(data, dict) else 'N/A'}", file=sys.stderr)
+                
+                # Extract accounts from response (similar to LocationList pattern)
+                accounts = []
+                if isinstance(data, list):
+                    print(f"DEBUG get_accounts: Data is a list with {len(data)} items", file=sys.stderr)
+                    print(f"{'='*60}\n", file=sys.stderr)
+                    return data
+                elif isinstance(data, dict):
+                    print(f"DEBUG get_accounts: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
+                    # Use AccountsList (the actual key from API response)
+                    accounts = data.get('AccountsList', [])
+                    print(f"DEBUG get_accounts: Extracted {len(accounts) if accounts else 0} accounts from AccountsList", file=sys.stderr)
+                    if isinstance(accounts, list):
+                        print(f"DEBUG get_accounts: Returning {len(accounts)} accounts", file=sys.stderr)
+                        print(f"{'='*60}\n", file=sys.stderr)
+                        return accounts
+                    elif isinstance(accounts, dict):
+                        print(f"DEBUG get_accounts: Single account object, wrapping in list", file=sys.stderr)
+                        print(f"{'='*60}\n", file=sys.stderr)
+                        return [accounts]
+                else:
+                    print(f"DEBUG get_accounts: Unexpected data type: {type(data)}", file=sys.stderr)
+            else:
+                import sys
+                print(f"DEBUG get_accounts: Non-200 status: {response.status_code}", file=sys.stderr)
+                print(f"DEBUG get_accounts: Response text: {response.text[:200] if response.text else 'None'}", file=sys.stderr)
+            import sys
+            print(f"DEBUG get_accounts: Returning empty list", file=sys.stderr)
+            print(f"{'='*60}\n", file=sys.stderr)
+            return []
+            return []
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return []
+    
+    def get_tax_rules(self) -> List[Dict[str, Any]]:
+        """
+        Get all tax rules from Cin7.
+        
+        Returns:
+            List of tax rule dictionaries
+        """
+        # Store debug info on instance for access by caller (similar to locations)
+        self._last_tax_response = None
+        self._last_tax_raw_data = None
+        
+        self._rate_limit()
+        base = self.base_url.rstrip('/')
+        url = f"{base}/ref/tax"
+        endpoint = "/ref/tax"
+        method = "GET"
+        params = {
+            'Page': 1,
+            'Limit': 100
+        }
+        start_time = time.time()
+        
+        import sys
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"DEBUG get_tax_rules: Making API call to {url}", file=sys.stderr)
+        print(f"DEBUG get_tax_rules: Method: {method}", file=sys.stderr)
+        
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            response_body = None
+            error_message = None
+            try:
+                response_body = response.json() if response.content else None
+            except:
+                response_body = response.text[:1000] if response.text else None
+            
+            if response.status_code != 200:
+                error_message = f"HTTP {response.status_code}: {response.text[:200] if response.text else 'Unknown error'}"
+            
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=response.status_code,
+                    response_body=response_body,
+                    error_message=error_message,
+                    duration_ms=duration_ms
+                )
+            
+            if response.status_code == 200:
+                data = response_body if response_body else {}
+                
+                # Store for debugging (similar to locations)
+                self._last_tax_response = {
+                    'status': response.status_code,
+                    'data_type': str(type(data)),
+                    'data': data,
+                    'is_list': isinstance(data, list),
+                    'is_dict': isinstance(data, dict),
+                    'keys': list(data.keys()) if isinstance(data, dict) else None,
+                    'raw_text': response.text[:1000] if hasattr(response, 'text') and response.text else None
+                }
+                self._last_tax_raw_data = data
+                
+                # Check for HTML error page
+                if isinstance(data, str) and '<!DOCTYPE html>' in data:
+                    import sys
+                    print(f"DEBUG get_tax_rules: Received HTML error page", file=sys.stderr)
+                    print(f"{'='*60}\n", file=sys.stderr)
+                    return []
+                
+                # Debug: print response structure (similar to locations)
+                import sys
+                raw_response_text = response.text[:500] if hasattr(response, 'text') else None
+                print(f"DEBUG get_tax_rules: Response status 200, data type: {type(data)}", file=sys.stderr)
+                print(f"DEBUG get_tax_rules: Response data: {data}", file=sys.stderr)
+                print(f"DEBUG get_tax_rules: Raw response text (first 500 chars): {raw_response_text}", file=sys.stderr)
+                print(f"DEBUG get_tax_rules: Response data keys (if dict): {list(data.keys()) if isinstance(data, dict) else 'N/A'}", file=sys.stderr)
+                
+                # Extract tax rules from response (similar to LocationList pattern)
+                tax_rules = []
+                if isinstance(data, list):
+                    print(f"DEBUG get_tax_rules: Data is a list with {len(data)} items", file=sys.stderr)
+                    print(f"{'='*60}\n", file=sys.stderr)
+                    return data
+                elif isinstance(data, dict):
+                    print(f"DEBUG get_tax_rules: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
+                    # Use TaxRuleList (the actual key from API response)
+                    tax_rules = data.get('TaxRuleList', [])
+                    print(f"DEBUG get_tax_rules: Extracted {len(tax_rules) if tax_rules else 0} tax rules from TaxRuleList", file=sys.stderr)
+                    if isinstance(tax_rules, list):
+                        print(f"DEBUG get_tax_rules: Returning {len(tax_rules)} tax rules", file=sys.stderr)
+                        print(f"{'='*60}\n", file=sys.stderr)
+                        return tax_rules
+                    elif isinstance(tax_rules, dict):
+                        print(f"DEBUG get_tax_rules: Single tax rule object, wrapping in list", file=sys.stderr)
+                        print(f"{'='*60}\n", file=sys.stderr)
+                        return [tax_rules]
+                else:
+                    import sys
+                    print(f"DEBUG get_tax_rules: Unexpected data type: {type(data)}", file=sys.stderr)
+            else:
+                import sys
+                print(f"DEBUG get_tax_rules: Non-200 status: {response.status_code}", file=sys.stderr)
+                print(f"DEBUG get_tax_rules: Response text: {response.text[:200] if response.text else 'None'}", file=sys.stderr)
+            import sys
+            print(f"DEBUG get_tax_rules: Returning empty list", file=sys.stderr)
+            print(f"{'='*60}\n", file=sys.stderr)
+            return []
+            return []
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return []
+    
+    def get_attribute_sets(self) -> List[Dict[str, Any]]:
+        """
+        Get all attribute sets from Cin7.
+        
+        Returns:
+            List of attribute set dictionaries
+        """
+        self._last_attribute_set_response = None  # Reset debug info
+        self._rate_limit()
+        base = self.base_url.rstrip('/')
+        url = f"{base}/ref/attributeset"
+        endpoint = "/ref/attributeset"
+        method = "GET"
+        params = {
+            'Page': 1,
+            'Limit': 100
+        }
+        start_time = time.time()
+        
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            response_body = None
+            error_message = None
+            try:
+                response_body = response.json() if response.content else None
+            except:
+                response_body = response.text[:1000] if response.text else None
+            
+            if response.status_code != 200:
+                error_message = f"HTTP {response.status_code}: {response.text[:200] if response.text else 'Unknown error'}"
+            
+            # Store debug info
+            self._last_attribute_set_response = {
+                'status': response.status_code,
+                'data_type': str(type(response_body)),
+                'data': response_body,
+                'is_list': isinstance(response_body, list),
+                'is_dict': isinstance(response_body, dict),
+                'keys': list(response_body.keys()) if isinstance(response_body, dict) else None,
+                'raw_text': response.text[:1000] if hasattr(response, 'text') and response.text else None
+            }
+            
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=response.status_code,
+                    response_body=response_body,
+                    error_message=error_message,
+                    duration_ms=duration_ms
+                )
+            
+            if response.status_code == 200:
+                data = response_body if response_body else {}
+                # Check for HTML error page
+                if isinstance(data, str) and '<!DOCTYPE html>' in data:
+                    import sys
+                    print(f"DEBUG get_attribute_sets: Received HTML error page", file=sys.stderr)
+                    return []
+                
+                # Debug: print response structure (similar to locations)
+                import sys
+                print(f"DEBUG get_attribute_sets: Response status: {response.status_code}", file=sys.stderr)
+                print(f"DEBUG get_attribute_sets: Data type: {type(data)}", file=sys.stderr)
+                
+                # Extract attribute sets from response (similar to LocationList pattern)
+                attribute_sets = []
+                if isinstance(data, list):
+                    print(f"DEBUG get_attribute_sets: Data is a list with {len(data)} items", file=sys.stderr)
+                    attribute_sets = data
+                elif isinstance(data, dict):
+                    print(f"DEBUG get_attribute_sets: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
+                    # Use AttributeSetList (the actual key from API response)
+                    attribute_sets = data.get('AttributeSetList', [])
+                    print(f"DEBUG get_attribute_sets: Extracted {len(attribute_sets) if attribute_sets else 0} attribute sets from AttributeSetList", file=sys.stderr)
+                
+                if isinstance(attribute_sets, list):
+                    print(f"DEBUG get_attribute_sets: Returning {len(attribute_sets)} attribute sets", file=sys.stderr)
+                    return attribute_sets
+                return []
+            return []
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return []
+    
+    def get_locations(self) -> List[Dict[str, Any]]:
+        """
+        Get all locations from Cin7.
+        
+        Returns:
+            List of location dictionaries
+        """
+        # Store debug info on instance for access by caller
+        self._last_location_response = None
+        self._last_location_raw_data = None
+        
+        self._rate_limit()
+        # Ensure base_url ends with /, then add ref/location
+        base = self.base_url.rstrip('/')
+        url = f"{base}/ref/location"
+        endpoint = "/ref/location"
+        method = "GET"
+        # Add query parameters (only include non-empty values)
+        params = {
+            'Page': 1,
+            'Deprecated': 'false'
+        }
+        start_time = time.time()
+        
+        import sys
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"DEBUG get_locations: Making API call to {url}", file=sys.stderr)
+        print(f"DEBUG get_locations: Method: {method}", file=sys.stderr)
+        print(f"DEBUG get_locations: Headers (sanitized): api-auth-accountid={self.account_id[:8]}..., api-auth-applicationkey=***", file=sys.stderr)
+        
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            print(f"DEBUG get_locations: Response status: {response.status_code}", file=sys.stderr)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            # Log the API call
+            response_body = None
+            error_message = None
+            try:
+                response_body = response.json() if response.content else None
+            except:
+                response_body = response.text[:1000] if response.text else None
+            
+            if response.status_code != 200:
+                error_message = f"HTTP {response.status_code}: {response.text[:200] if response.text else 'Unknown error'}"
+            
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=response.status_code,
+                    response_body=response_body,
+                    error_message=error_message,
+                    duration_ms=duration_ms
+                )
+            
+            if response.status_code == 200:
+                data = response_body if response_body else {}
+                # Store for debugging
+                self._last_location_response = {
+                    'status': response.status_code,
+                    'data_type': str(type(data)),
+                    'data': data,
+                    'is_list': isinstance(data, list),
+                    'is_dict': isinstance(data, dict),
+                    'keys': list(data.keys()) if isinstance(data, dict) else None,
+                    'raw_text': response.text[:1000] if hasattr(response, 'text') and response.text else None
+                }
+                self._last_location_raw_data = data
+                
+                # Also capture raw response text for debugging
+                raw_response_text = response.text[:500] if hasattr(response, 'text') else None
+                print(f"DEBUG get_locations: Response status 200, data type: {type(data)}", file=sys.stderr)
+                print(f"DEBUG get_locations: Response data: {data}", file=sys.stderr)
+                print(f"DEBUG get_locations: Raw response text (first 500 chars): {raw_response_text}", file=sys.stderr)
+                print(f"DEBUG get_locations: Response data keys (if dict): {list(data.keys()) if isinstance(data, dict) else 'N/A'}", file=sys.stderr)
+                
+                # API returns locations in a dict with LocationList key (similar to CustomerList)
+                if isinstance(data, list):
+                    print(f"DEBUG get_locations: Data is a list with {len(data)} items", file=sys.stderr)
+                    print(f"{'='*60}\n", file=sys.stderr)
+                    return data
+                elif isinstance(data, dict):
+                    print(f"DEBUG get_locations: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
+                    # Cin7 API returns locations in LocationList key
+                    locations = data.get('LocationList', [])
+                    print(f"DEBUG get_locations: Extracted {len(locations) if locations else 0} locations from LocationList", file=sys.stderr)
+                    if isinstance(locations, list):
+                        print(f"DEBUG get_locations: Returning {len(locations)} locations", file=sys.stderr)
+                        print(f"{'='*60}\n", file=sys.stderr)
+                        return locations
+                    # If it's a single location object, wrap it in a list
+                    elif isinstance(locations, dict):
+                        print(f"DEBUG get_locations: Single location object, wrapping in list", file=sys.stderr)
+                        print(f"{'='*60}\n", file=sys.stderr)
+                        return [locations]
+                else:
+                    print(f"DEBUG get_locations: Unexpected data type: {type(data)}", file=sys.stderr)
+            else:
+                print(f"DEBUG get_locations: Non-200 status: {response.status_code}", file=sys.stderr)
+                print(f"DEBUG get_locations: Response text: {response.text[:200] if response.text else 'None'}", file=sys.stderr)
+            print(f"DEBUG get_locations: Returning empty list", file=sys.stderr)
+            print(f"{'='*60}\n", file=sys.stderr)
+            return []
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            print(f"Error fetching locations: {str(e)}")
+            return []
+    
     def validate_customer(self, customer_id: str) -> Tuple[bool, str]:
         """
         Validate that a customer exists.
@@ -984,4 +1491,112 @@ class Cin7SalesAPI:
                 )
             print(f"Error fetching all products: {str(e)}")
             return []
+    
+    def create_customer(self, customer_data: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Create a new customer in Cin7.
+        
+        Args:
+            customer_data: Dictionary containing customer data (Name is required)
+        
+        Returns:
+            (success, message, customer_data)
+        """
+        self._rate_limit()
+        url = f"{self.base_url}/customer"
+        endpoint = "/customer"
+        method = "POST"
+        start_time = time.time()
+        
+        try:
+            response = self.session.post(url, json=customer_data, timeout=30)
+            return self._handle_response(response, endpoint, method, url,
+                                       dict(self.session.headers), customer_data, start_time)
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.time() - start_time) * 1000)
+            if self.logger_callback:
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=dict(self.session.headers),
+                    request_body=customer_data,
+                    response_status=None,
+                    response_body=None,
+                    error_message="Request timeout",
+                    duration_ms=duration_ms
+                )
+            return (False, "Request timeout", None)
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=dict(self.session.headers),
+                    request_body=customer_data,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return (False, error_msg, None)
+    
+    def create_customer_address(self, customer_id: str, address_data: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Create a new address for a customer in Cin7.
+        
+        Args:
+            customer_id: Customer ID (UUID)
+            address_data: Dictionary containing address data (Type, Line1, City, etc.)
+        
+        Returns:
+            (success, message, address_data)
+        """
+        self._rate_limit()
+        url = f"{self.base_url}/customeraddress"
+        endpoint = "/customeraddress"
+        method = "POST"
+        start_time = time.time()
+        
+        # Add CustomerID to address data
+        address_payload = {**address_data, 'CustomerID': customer_id}
+        
+        try:
+            response = self.session.post(url, json=address_payload, timeout=30)
+            return self._handle_response(response, endpoint, method, url,
+                                       dict(self.session.headers), address_payload, start_time)
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.time() - start_time) * 1000)
+            if self.logger_callback:
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=dict(self.session.headers),
+                    request_body=address_payload,
+                    response_status=None,
+                    response_body=None,
+                    error_message="Request timeout",
+                    duration_ms=duration_ms
+                )
+            return (False, "Request timeout", None)
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=dict(self.session.headers),
+                    request_body=address_payload,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return (False, error_msg, None)
 

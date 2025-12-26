@@ -382,6 +382,23 @@ def validate_data():
     tax_rule = cred_row.tax_rule
     default_status = cred_row.default_status
     
+    # Extract customer default fields
+    customer_account_receivable = None
+    customer_revenue_account = None
+    customer_tax_rule = None
+    customer_attribute_set = None
+    
+    if 'customer_account_receivable' in existing_customer_cols and hasattr(cred_row, 'customer_account_receivable'):
+        # Account codes are stored as strings
+        customer_account_receivable = cred_row.customer_account_receivable if cred_row.customer_account_receivable else None
+    if 'customer_revenue_account' in existing_customer_cols and hasattr(cred_row, 'customer_revenue_account'):
+        # Account codes are stored as strings
+        customer_revenue_account = cred_row.customer_revenue_account if cred_row.customer_revenue_account else None
+    if 'customer_tax_rule' in existing_customer_cols and hasattr(cred_row, 'customer_tax_rule'):
+        customer_tax_rule = str(cred_row.customer_tax_rule) if cred_row.customer_tax_rule else None
+    if 'customer_attribute_set' in existing_customer_cols and hasattr(cred_row, 'customer_attribute_set'):
+        customer_attribute_set = cred_row.customer_attribute_set
+    
     # Get settings
     settings_obj = ClientSettings.query.filter_by(client_id=session['client_id']).first()
     settings = {}
@@ -394,7 +411,11 @@ def validate_data():
             'require_customer_reference': settings_obj.require_customer_reference,
             'require_invoice_number': settings_obj.require_invoice_number,
             'sale_type': sale_type,
-            'tax_rule': tax_rule
+            'tax_rule': tax_rule,
+            'customer_account_receivable': customer_account_receivable,
+            'customer_revenue_account': customer_revenue_account,
+            'customer_tax_rule': customer_tax_rule,
+            'customer_attribute_set': customer_attribute_set
         }
     else:
         # Use defaults from client_erp_credentials
@@ -406,7 +427,11 @@ def validate_data():
             'require_customer_reference': False,
             'require_invoice_number': False,
             'sale_type': sale_type,
-            'tax_rule': tax_rule
+            'tax_rule': tax_rule,
+            'customer_account_receivable': customer_account_receivable,
+            'customer_revenue_account': customer_revenue_account,
+            'customer_tax_rule': customer_tax_rule,
+            'customer_attribute_set': customer_attribute_set
         }
     
     # Use the credential_id (client_erp_credentials.id) for logging, not client_id
@@ -533,8 +558,8 @@ def validate_data():
     return jsonify({
         'valid_count': len(valid_rows),
         'invalid_count': len(invalid_rows),
-        'valid_rows': valid_rows[:10],  # Return first 10 for preview
-        'invalid_rows': invalid_rows[:10],  # Return first 10 for preview
+        'valid_rows': valid_rows,  # Return all validated rows
+        'invalid_rows': invalid_rows,  # Return all invalid rows
         'customer_count': customer_count,
         'product_count': product_count
     }), 200
@@ -565,14 +590,49 @@ def create_sales_orders():
     
     # Get credentials from voyager.client_erp_credentials
     client_erp_credentials_id = session.get('client_erp_credentials_id', session['client_id'])
-    query = text("""
+    # Check which customer default columns exist
+    check_customer_cols_query = text("""
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_schema = 'voyager' 
+        AND table_name = 'client_erp_credentials' 
+        AND column_name IN ('customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set')
+    """)
+    existing_customer_cols = {row[0] for row in db.session.execute(check_customer_cols_query).fetchall()}
+    
+    # Build SELECT fields
+    select_fields = [
+        'cec.id',
+        'cec.cin7_api_auth_accountid as account_id',
+        'cec.cin7_api_auth_applicationkey as application_key',
+        'cec.sale_type',
+        'cec.tax_rule',
+        'cec.default_status'
+    ]
+    
+    if 'customer_account_receivable' in existing_customer_cols:
+        select_fields.append('cec.customer_account_receivable')
+    else:
+        select_fields.append('NULL as customer_account_receivable')
+    
+    if 'customer_revenue_account' in existing_customer_cols:
+        select_fields.append('cec.customer_revenue_account')
+    else:
+        select_fields.append('NULL as customer_revenue_account')
+    
+    if 'customer_tax_rule' in existing_customer_cols:
+        select_fields.append('cec.customer_tax_rule')
+    else:
+        select_fields.append('NULL as customer_tax_rule')
+    
+    if 'customer_attribute_set' in existing_customer_cols:
+        select_fields.append('cec.customer_attribute_set')
+    else:
+        select_fields.append('NULL as customer_attribute_set')
+    
+    query = text(f"""
         SELECT 
-            cec.id,
-            cec.cin7_api_auth_accountid as account_id,
-            cec.cin7_api_auth_applicationkey as application_key,
-            cec.sale_type,
-            cec.tax_rule,
-            cec.default_status
+            {', '.join(select_fields)}
         FROM voyager.client_erp_credentials cec
         WHERE cec.erp = 'cin7_core'
         AND cec.id = :cred_id
@@ -588,6 +648,23 @@ def create_sales_orders():
     sale_type = cred_row.sale_type
     tax_rule = cred_row.tax_rule
     default_status = cred_row.default_status
+    
+    # Extract customer default fields
+    customer_account_receivable = None
+    customer_revenue_account = None
+    customer_tax_rule = None
+    customer_attribute_set = None
+    
+    if 'customer_account_receivable' in existing_customer_cols and hasattr(cred_row, 'customer_account_receivable'):
+        # Account codes are stored as strings
+        customer_account_receivable = cred_row.customer_account_receivable if cred_row.customer_account_receivable else None
+    if 'customer_revenue_account' in existing_customer_cols and hasattr(cred_row, 'customer_revenue_account'):
+        # Account codes are stored as strings
+        customer_revenue_account = cred_row.customer_revenue_account if cred_row.customer_revenue_account else None
+    if 'customer_tax_rule' in existing_customer_cols and hasattr(cred_row, 'customer_tax_rule'):
+        customer_tax_rule = str(cred_row.customer_tax_rule) if cred_row.customer_tax_rule else None
+    if 'customer_attribute_set' in existing_customer_cols and hasattr(cred_row, 'customer_attribute_set'):
+        customer_attribute_set = cred_row.customer_attribute_set
     
     # Get settings (try to find by client_id from client_erp_credentials, or use defaults)
     settings_obj = None
@@ -609,7 +686,11 @@ def create_sales_orders():
             'default_location': settings_obj.default_location,
             'default_delay_between_orders': settings_obj.default_delay_between_orders,
             'sale_type': sale_type,
-            'tax_rule': tax_rule
+            'tax_rule': tax_rule,
+            'customer_account_receivable': customer_account_receivable,
+            'customer_revenue_account': customer_revenue_account,
+            'customer_tax_rule': customer_tax_rule,
+            'customer_attribute_set': customer_attribute_set
         }
     else:
         # Use defaults from client_erp_credentials
@@ -620,7 +701,11 @@ def create_sales_orders():
             'default_location': None,
             'default_delay_between_orders': 0.7,
             'sale_type': sale_type,
-            'tax_rule': tax_rule
+            'tax_rule': tax_rule,
+            'customer_account_receivable': customer_account_receivable,
+            'customer_revenue_account': customer_revenue_account,
+            'customer_tax_rule': customer_tax_rule,
+            'customer_attribute_set': customer_attribute_set
         }
     
     builder = SalesOrderBuilder(settings, None)  # Will set api_client later
@@ -793,7 +878,13 @@ def create_sales_orders():
             time.sleep(delay)
             
             # Step 2: Build and create Sale Order
-            sale_order_data = builder.build_sale_order(row_result['data'], column_mapping, sale_id)
+            # Check if this is a grouped order (multiple rows)
+            if 'group_rows' in row_result and row_result['group_rows']:
+                # Use grouped rows to build sale order with all line items
+                sale_order_data = builder.build_sale_order_from_rows(row_result['group_rows'], column_mapping, sale_id)
+            else:
+                # Single row order
+                sale_order_data = builder.build_sale_order(row_result['data'], column_mapping, sale_id)
             
             # Create Sale Order via API
             so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)

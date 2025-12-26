@@ -70,13 +70,12 @@ class SalesOrderBuilder:
             customer_data = self._lookup_customer_by_name(mapped['CustomerName'])
             if customer_data:
                 sale['CustomerID'] = customer_data.get('ID')
-                # Get shipping and billing address IDs if available and valid
-                shipping_address = customer_data.get('ShippingAddress')
-                if shipping_address and isinstance(shipping_address, dict) and shipping_address.get('ID'):
-                    sale['ShippingAddress'] = shipping_address.get('ID')
-                billing_address = customer_data.get('BillingAddress')
-                if billing_address and isinstance(billing_address, dict) and billing_address.get('ID'):
-                    sale['BillingAddress'] = billing_address.get('ID')
+                # Don't set default shipping address here - will be handled by CSV mapping below if provided
+                # Only set billing address as default if not provided in CSV
+                if 'BillingAddress' not in mapped or not mapped['BillingAddress']:
+                    billing_address = customer_data.get('BillingAddress')
+                    if billing_address and isinstance(billing_address, dict) and billing_address.get('ID'):
+                        sale['BillingAddress'] = billing_address.get('ID')
                 # Set Customer name from lookup
                 sale['Customer'] = customer_data.get('Name') or mapped['CustomerName']
             else:
@@ -98,12 +97,12 @@ class SalesOrderBuilder:
             
             if customer_data:
                 sale['Customer'] = customer_data.get('Name')
-                shipping_address = customer_data.get('ShippingAddress')
-                if shipping_address and isinstance(shipping_address, dict) and shipping_address.get('ID'):
-                    sale['ShippingAddress'] = shipping_address.get('ID')
-                billing_address = customer_data.get('BillingAddress')
-                if billing_address and isinstance(billing_address, dict) and billing_address.get('ID'):
-                    sale['BillingAddress'] = billing_address.get('ID')
+                # Don't set default shipping address - will be handled by CSV mapping below if provided
+                # Only set billing address as default if not provided in CSV
+                if 'BillingAddress' not in mapped or not mapped['BillingAddress']:
+                    billing_address = customer_data.get('BillingAddress')
+                    if billing_address and isinstance(billing_address, dict) and billing_address.get('ID'):
+                        sale['BillingAddress'] = billing_address.get('ID')
         
         # BillingAddress - override if explicitly provided
         if 'BillingAddress' in mapped and mapped['BillingAddress']:
@@ -116,16 +115,90 @@ class SalesOrderBuilder:
                 if mapped['BillingAddress']:
                     sale['BillingAddress'] = mapped['BillingAddress']
         
-        # ShippingAddress - override if explicitly provided
-        if 'ShippingAddress' in mapped and mapped['ShippingAddress']:
+        # ShippingAddress - from CSV "Ship To" column
+        # Flow: 1) Find customer by name, 2) Match address, 3) Use ID if match, 4) Create new if no match
+        if 'ShippingAddress' in mapped and mapped['ShippingAddress'] and customer_data:
+            shipping_addr_str = mapped['ShippingAddress']
+            
+            # Check if it's already a UUID string (address ID) - use directly
             try:
-                shipping_addr_value = str(uuid.UUID(mapped['ShippingAddress']))
-                if shipping_addr_value:  # Only set if not empty
-                    sale['ShippingAddress'] = shipping_addr_value
-            except ValueError:
-                # If not a UUID, might be an address object - pass as-is if not empty
-                if mapped['ShippingAddress']:
-                    sale['ShippingAddress'] = mapped['ShippingAddress']
+                address_id = str(uuid.UUID(shipping_addr_str))
+                # It's a valid UUID - use as ID (references existing address)
+                sale['ShippingAddress'] = address_id
+            except (ValueError, TypeError):
+                # Not a UUID - parse address string and match/create address
+                from cin7_sales.fuzzy_match import parse_address_string, fuzzy_match_address
+                
+                # Parse the address string into components
+                address_dict = parse_address_string(shipping_addr_str)
+                
+                if not address_dict.get('Line1'):
+                    # Can't proceed without at least Line1
+                    pass
+                else:
+                    # Get customer's existing addresses
+                    customer_addresses = []
+                    shipping_addr = customer_data.get('ShippingAddress')
+                    if shipping_addr:
+                        if isinstance(shipping_addr, dict):
+                            customer_addresses.append(shipping_addr)
+                        elif isinstance(shipping_addr, list):
+                            customer_addresses.extend(shipping_addr)
+                    
+                    billing_addr = customer_data.get('BillingAddress')
+                    if billing_addr:
+                        if isinstance(billing_addr, dict):
+                            if billing_addr not in customer_addresses:
+                                customer_addresses.append(billing_addr)
+                        elif isinstance(billing_addr, list):
+                            for addr in billing_addr:
+                                if addr not in customer_addresses:
+                                    customer_addresses.append(addr)
+                    
+                    # Try to fuzzy match against existing addresses
+                    matched_address = None
+                    if customer_addresses:
+                        match_result = fuzzy_match_address(shipping_addr_str, customer_addresses, threshold=0.80)
+                        if match_result[0]:  # Found a match
+                            matched_address = match_result[0]
+                    
+                    if matched_address and matched_address.get('ID'):
+                        # Use existing address ID
+                        sale['ShippingAddress'] = matched_address['ID']
+                    else:
+                        # No match found - use full address object
+                        # Cin7 will automatically create the address when creating the sale (if ShipToOther=false)
+                        # Build address object according to Cin7 API spec
+                        address_obj = {
+                            'Line1': address_dict.get('Line1', ''),
+                            'Line2': address_dict.get('Line2', ''),
+                            'City': address_dict.get('City', ''),
+                            'State': address_dict.get('State', ''),
+                            'Postcode': address_dict.get('Postcode', ''),
+                            'Country': address_dict.get('Country', '')
+                        }
+                        
+                        # Add Company if parsed
+                        if address_dict.get('Company'):
+                            address_obj['Company'] = address_dict['Company']
+                        
+                        # Build DisplayAddressLine1 (Line1 + Line2)
+                        display_line1_parts = [address_obj['Line1']]
+                        if address_obj['Line2']:
+                            display_line1_parts.append(address_obj['Line2'])
+                        address_obj['DisplayAddressLine1'] = ' '.join(filter(None, display_line1_parts))
+                        
+                        # Build DisplayAddressLine2 (City + State + Postcode + Country)
+                        display_line2_parts = []
+                        for field in ['City', 'State', 'Postcode', 'Country']:
+                            if address_obj.get(field):
+                                display_line2_parts.append(address_obj[field])
+                        address_obj['DisplayAddressLine2'] = ' '.join(filter(None, display_line2_parts))
+                        
+                        # Set ShipToOther to false - Cin7 will create new customer shipping address if no match found
+                        address_obj['ShipToOther'] = False
+                        
+                        sale['ShippingAddress'] = address_obj
         
         # ShipBy - date when order should be shipped
         if 'ShipBy' in mapped and mapped['ShipBy']:
@@ -142,6 +215,60 @@ class SalesOrderBuilder:
             sale['CustomerReference'] = mapped['CustomerReference']
         
         return sale
+    
+    def build_sale_order_from_rows(self, rows: List[Dict[str, Any]], column_mapping: Dict[str, str], sale_id: str) -> Dict[str, Any]:
+        """
+        Build a Cin7 Sale Order payload from multiple CSV rows (for grouped orders).
+        Combines all line items from all rows into a single order.
+        
+        Args:
+            rows: List of row dictionaries with 'data' key
+            column_mapping: Mapping of Cin7 fields to CSV columns
+            sale_id: The ID of the Sale created in the first step
+        
+        Returns:
+            Cin7 Sale Order dictionary with all line items combined
+        """
+        # Build Sale Order payload - SaleID, Status, and Lines are required
+        # Status for POST: only DRAFT and AUTHORISED are accepted
+        status = self.settings.get('default_status', 'DRAFT')
+        if status not in ['DRAFT', 'AUTHORISED']:
+            status = 'DRAFT'  # Default to DRAFT if invalid
+        
+        sale_order = {
+            'SaleID': sale_id,  # Reference to the Sale created first
+            'Status': status
+        }
+        
+        # Build lines from all rows
+        all_lines = []
+        for row_data in rows:
+            row_lines = self._build_lines(row_data, column_mapping)
+            all_lines.extend(row_lines)
+        
+        sale_order['Lines'] = all_lines
+        
+        # Calculate Total from lines (sum of all line totals)
+        total = 0.0
+        for line in all_lines:
+            quantity = line.get('Quantity', 0)
+            price = line.get('Price', 0)
+            discount = line.get('Discount', 0)
+            line_total = (quantity * price) - discount
+            total += line_total
+        
+        sale_order['Total'] = total
+        
+        # Tax - calculate from line taxes
+        tax = 0.0
+        for line in all_lines:
+            line_tax = line.get('Tax', 0.0)
+            if isinstance(line_tax, (int, float)):
+                tax += float(line_tax)
+        
+        sale_order['Tax'] = tax
+        
+        return sale_order
     
     def build_sale_order(self, row_data: Dict[str, Any], column_mapping: Dict[str, str], sale_id: str) -> Dict[str, Any]:
         """
@@ -355,16 +482,41 @@ class SalesOrderBuilder:
                         if quantity:
                             line['Quantity'] = quantity
                         
-                        # Price (required)
+                        # Price (required) - can be mapped directly or calculated from Total / Cases
+                        price_value = None
                         if 'Price' in column_mapping and column_mapping['Price']:
                             price_col = column_mapping['Price']
                             if price_col in row_data:
                                 try:
                                     # Remove currency symbols and parse
                                     price_str = str(row_data[price_col]).replace('$', '').replace(',', '').strip()
-                                    line['Price'] = float(price_str)
+                                    if price_str:  # Only use if not empty
+                                        price_value = float(price_str)
                                 except (ValueError, TypeError):
                                     pass
+                        
+                        # If Price not provided, try to calculate from Total / Cases (Quantity)
+                        if not price_value and quantity and quantity > 0:
+                            # Look for Total column
+                            total_value = None
+                            # Check if there's a mapped Total field, or look for common Total column names
+                            for col_name in row_data.keys():
+                                col_lower = col_name.lower()
+                                if 'total' in col_lower and 'extended' not in col_lower:
+                                    try:
+                                        total_str = str(row_data[col_name]).replace('$', '').replace(',', '').strip()
+                                        if total_str:
+                                            total_value = float(total_str)
+                                            break
+                                    except (ValueError, TypeError):
+                                        pass
+                            
+                            # Calculate Price = Total / Cases (Quantity)
+                            if total_value and total_value > 0:
+                                price_value = total_value / quantity
+                        
+                        if price_value:
+                            line['Price'] = price_value
                         
                         # Lookup product by SKU to get ProductID and Name
                         if sku:
