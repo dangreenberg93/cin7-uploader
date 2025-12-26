@@ -365,7 +365,11 @@ class SalesOrderValidator:
             }
         
         # Get value from CSV
-        value = row_data.get(csv_column, '').strip() if csv_column in row_data else None
+        if csv_column and csv_column in row_data:
+            raw_value = row_data.get(csv_column, '')
+            value = raw_value.strip() if raw_value and isinstance(raw_value, str) else (raw_value if raw_value else None)
+        else:
+            value = None
         
         # Check if value exists
         if not value:
@@ -750,7 +754,9 @@ class SalesOrderValidator:
                 
                 # Build lookup by name (case-insensitive, strip whitespace)
                 if customer_name:
-                    customer_name_clean = customer_name.strip()
+                    customer_name_clean = customer_name.strip() if customer_name else None
+                    if not customer_name_clean:
+                        continue
                     # Store by original, upper, and lower case for flexible lookup
                     self.customer_lookup[customer_name_clean] = customer
                     self.customer_lookup[customer_name_clean.upper()] = customer

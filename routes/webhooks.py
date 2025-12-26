@@ -5,14 +5,16 @@ import logging
 import requests
 import uuid
 import time
-from datetime import datetime
+import threading
+import os
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from database import db, SalesOrderUpload, SalesOrderResult, ClientSettings, ClientCsvMapping, Cin7ApiLog, Client
 from cin7_sales.api_client import Cin7SalesAPI
 from cin7_sales.csv_parser import CSVParser
 from cin7_sales.validator import SalesOrderValidator
 from cin7_sales.sales_order_builder import SalesOrderBuilder
-from sqlalchemy import text
+from sqlalchemy import text, func
 from routes.auth import User
 
 webhooks_bp = Blueprint('webhooks', __name__)
@@ -403,16 +405,24 @@ def process_single_order(
             }
     
     except Exception as e:
-        logger.error(f"Error processing order {order_key}: {str(e)}", exc_info=True)
+        error_msg = str(e)
+        logger.error(f"Error processing order {order_key}: {error_msg}", exc_info=True)
+        
+        # Improve error message for common issues
+        if "'NoneType' object has no attribute 'strip'" in error_msg:
+            error_msg = "Missing required data in CSV. Please check that column mappings are configured correctly in the Mappings page. Required fields may be missing or empty."
+        elif "No column mapping" in error_msg:
+            error_msg = "Column mappings not configured. Please set up CSV column mappings in the Mappings page for this client."
+        
         order_result.status = 'failed'
-        order_result.error_message = str(e)
+        order_result.error_message = error_msg
         order_result.order_data = order_data
         order_result.processed_at = datetime.utcnow()
         db.session.commit()
         
         return {
             'status': 'failed',
-            'error_message': str(e),
+            'error_message': error_msg,
             'order_data': order_data
         }
 
@@ -470,7 +480,12 @@ def process_webhook_csv(
             column_mapping[cin7_field] = csv_column
     
     if not column_mapping:
-        return {'error': 'No column mapping found or detected'}
+        return {
+            'error': 'No column mapping found or detected',
+            'details': 'Please configure CSV column mappings in the Mappings page for this client. The system could not automatically detect required columns.',
+            'detected_columns': list(detected_mappings.keys()) if detected_mappings else [],
+            'csv_columns': list(rows[0]['data'].keys()) if rows else []
+        }
     
     # Get credentials and settings
     check_customer_cols_query = text("""
@@ -766,9 +781,29 @@ def receive_email_webhook():
         client_row = client_result.fetchone()
         client_id_for_upload = client_row.client_id if client_row and client_row.client_id else None
         
+        # Check for duplicate upload (same filename + client within last hour) - idempotency
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        recent_duplicate = SalesOrderUpload.query.filter_by(
+            filename=filename,
+            client_id=client_id_for_upload
+        ).filter(
+            SalesOrderUpload.created_at >= one_hour_ago
+        ).order_by(SalesOrderUpload.created_at.desc()).first()
+        
+        if recent_duplicate:
+            logger.info(f"Duplicate webhook detected - filename: {filename}, existing upload_id: {recent_duplicate.id}")
+            return jsonify({
+                'message': 'This file was already processed recently',
+                'upload_id': str(recent_duplicate.id),
+                'status': recent_duplicate.status,
+                'created_at': recent_duplicate.created_at.isoformat() if recent_duplicate.created_at else None,
+                'duplicate': True
+            }), 200  # Return 200 to prevent Missive from retrying
+        
         # Create upload record immediately
+        upload_id = uuid.uuid4()
         upload = SalesOrderUpload(
-            id=uuid.uuid4(),
+            id=upload_id,
             user_id=None,  # Webhook has no user context
             client_id=client_id_for_upload,  # May be None for standalone connections
             filename=filename,
@@ -780,29 +815,58 @@ def receive_email_webhook():
         db.session.add(upload)
         db.session.commit()
         
-        # Process CSV (this will update the upload record)
-        result = process_webhook_csv(
-            upload_id=upload.id,
-            client_erp_credentials_id=client_erp_credentials_id,
-            csv_content=csv_content,
-            filename=filename
-        )
+        # Return 200 immediately to acknowledge webhook receipt
+        # Process CSV in background thread
+        def process_in_background():
+            """Process CSV in background thread"""
+            try:
+                # Create new database session for background thread
+                from app import create_app
+                app = create_app('production' if os.environ.get('FLASK_ENV') == 'production' else 'development')
+                with app.app_context():
+                    result = process_webhook_csv(
+                        upload_id=upload_id,
+                        client_erp_credentials_id=client_erp_credentials_id,
+                        csv_content=csv_content,
+                        filename=filename
+                    )
+                    
+                    upload = SalesOrderUpload.query.get(upload_id)
+                    if upload:
+                        if 'error' in result:
+                            upload.status = 'failed'
+                            upload.error_log = [result.get('error')]
+                            upload.completed_at = datetime.utcnow()
+                        else:
+                            upload.status = 'completed'
+                            upload.completed_at = datetime.utcnow()
+                        db.session.commit()
+                        logger.info(f"Background processing completed - upload_id: {upload_id}, client: {client_name}, orders: {result.get('total_orders', 0)}")
+            except Exception as e:
+                logger.error(f"Error in background processing for upload {upload_id}: {str(e)}", exc_info=True)
+                try:
+                    upload = SalesOrderUpload.query.get(upload_id)
+                    if upload:
+                        upload.status = 'failed'
+                        upload.error_log = [f'Background processing error: {str(e)}']
+                        upload.completed_at = datetime.utcnow()
+                        db.session.commit()
+                except Exception as db_error:
+                    logger.error(f"Error updating upload status: {str(db_error)}", exc_info=True)
         
-        if 'error' in result:
-            upload.status = 'failed'
-            upload.error_log = [result.get('error')]
-            upload.completed_at = datetime.utcnow()
-            db.session.commit()
-            return jsonify(result), 400
+        # Start background processing
+        thread = threading.Thread(target=process_in_background, daemon=True)
+        thread.start()
         
-        logger.info(f"Webhook processed successfully - upload_id: {upload.id}, client: {client_name}, orders: {result.get('total_orders', 0)}")
+        logger.info(f"Webhook received and queued for processing - upload_id: {upload_id}, client: {client_name}, filename: {filename}")
         
+        # Return 200 immediately
         return jsonify({
-            'upload_id': str(upload.id),
-            'successful': result.get('successful', 0),
-            'failed': result.get('failed', 0),
-            'total_orders': result.get('total_orders', 0),
-            'client_name': client_name
+            'message': 'Webhook received and processing started',
+            'upload_id': str(upload_id),
+            'status': 'processing',
+            'client_name': client_name,
+            'filename': filename
         }), 200
     
     except Exception as e:

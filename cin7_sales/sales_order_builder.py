@@ -49,7 +49,8 @@ class SalesOrderBuilder:
         
         # Build Sale payload
         # Determine Type based on sale_type setting: "Advanced" -> "Advanced Sale", "Simple" -> "Simple Sale"
-        sale_type_setting = self.settings.get('sale_type', '').strip()
+        sale_type_setting = self.settings.get('sale_type', '')
+        sale_type_setting = sale_type_setting.strip() if sale_type_setting and isinstance(sale_type_setting, str) else ''
         if sale_type_setting.lower() == 'advanced':
             sale_type_value = 'Advanced Sale'
         elif sale_type_setting.lower() == 'simple':
@@ -357,11 +358,14 @@ class SalesOrderBuilder:
             return self._customer_cache[customer_name]
         
         # Check preloaded data first (avoid API calls)
-        if self.preloaded_customers:
-            customer_name_clean = customer_name.strip()
-            customer = (self.preloaded_customers.get(customer_name_clean) or 
-                       self.preloaded_customers.get(customer_name_clean.upper()) or
-                       self.preloaded_customers.get(customer_name_clean.lower()))
+        if self.preloaded_customers and customer_name:
+            customer_name_clean = customer_name.strip() if customer_name else None
+            if customer_name_clean:
+                customer = (self.preloaded_customers.get(customer_name_clean) or 
+                           self.preloaded_customers.get(customer_name_clean.upper()) or
+                           self.preloaded_customers.get(customer_name_clean.lower()))
+            else:
+                customer = None
             if customer:
                 self._customer_cache[customer_name] = customer
                 return customer
