@@ -44,7 +44,10 @@ def extract_client_name_from_subject(subject: str) -> Optional[str]:
         parts = subject.split('->', 1)
         if len(parts) == 2:
             client_part = parts[1].split('Daily Sales Orders', 1)[0].strip()
+            # Clean up any leading/trailing whitespace or dashes
+            client_part = client_part.strip(' -:').strip()
             if client_part:
+                logger.info(f"Extracted client name from subject '{subject}': '{client_part}'")
                 return client_part
     
     # Fallback pattern: "{Client Name} Daily Sales Orders"
@@ -1058,100 +1061,164 @@ def receive_email_webhook():
         client_row = client_result.fetchone()
         client_id_for_upload = client_row.client_id if client_row and client_row.client_id else None
         
-        # Check for duplicate upload (same filename + client within last hour) - idempotency
+        # Check for duplicate upload (same filename + credentials within last hour) - idempotency
+        # Use client_erp_credentials_id since that uniquely identifies the connection
+        # (client_id can be None for standalone connections, causing false duplicates)
         one_hour_ago = datetime.utcnow() - timedelta(hours=1)
         logger.info(f"Checking for duplicate upload - filename: {filename}, client_id: {client_id_for_upload}, client_erp_credentials_id: {client_erp_credentials_id}")
         recent_duplicate = SalesOrderUpload.query.filter_by(
             filename=filename,
-            client_id=client_id_for_upload
+            client_erp_credentials_id=client_erp_credentials_id
         ).filter(
             SalesOrderUpload.created_at >= one_hour_ago
         ).order_by(SalesOrderUpload.created_at.desc()).first()
-        
-        if recent_duplicate:
-            logger.info(f"Duplicate webhook detected - filename: {filename}, existing upload_id: {recent_duplicate.id}")
-            return jsonify({
-                'message': 'This file was already processed recently',
-                'upload_id': str(recent_duplicate.id),
-                'status': recent_duplicate.status,
-                'created_at': recent_duplicate.created_at.isoformat() if recent_duplicate.created_at else None,
-                'duplicate': True
-            }), 200  # Return 200 to prevent Missive from retrying
-        
-        logger.info(f"No duplicate found, proceeding with new upload creation")
         
         # Store CSV content as base64 for preview
         import base64
         csv_base64 = base64.b64encode(csv_content).decode('utf-8')
         
-        # Create upload record immediately
+        # Create upload record immediately (even if duplicate, so it appears in UI)
         upload_id = uuid.uuid4()
         logger.info(f"Creating upload record - upload_id: {upload_id}, filename: {filename}, client_erp_credentials_id: {client_erp_credentials_id}, client_id: {client_id_for_upload}")
-        upload = SalesOrderUpload(
-            id=upload_id,
-            user_id=None,  # Webhook has no user context
-            client_id=client_id_for_upload,  # May be None for standalone connections
-            client_erp_credentials_id=client_erp_credentials_id,  # Store credentials ID for retry
-            filename=filename,
-            total_rows=0,  # Will be updated after parsing
-            successful_orders=0,
-            failed_orders=0,
-            status='processing',
-            csv_content=csv_base64  # Store CSV for preview
-        )
+        
+        # Check if this is a duplicate
+        is_duplicate = recent_duplicate is not None
+        if is_duplicate:
+            logger.info(f"Duplicate webhook detected - filename: {filename}, existing upload_id: {recent_duplicate.id}")
+            upload = SalesOrderUpload(
+                id=upload_id,
+                user_id=None,  # Webhook has no user context
+                client_id=client_id_for_upload,  # May be None for standalone connections
+                client_erp_credentials_id=client_erp_credentials_id,  # Store credentials ID for retry
+                filename=filename,
+                total_rows=0,
+                successful_orders=0,
+                failed_orders=0,
+                status='duplicate',  # Mark as duplicate so it appears in UI
+                error_log=[{
+                    'message': f'This file was already processed recently',
+                    'duplicate_of_upload_id': str(recent_duplicate.id),
+                    'duplicate_of_created_at': recent_duplicate.created_at.isoformat() if recent_duplicate.created_at else None,
+                    'duplicate_of_status': recent_duplicate.status
+                }],
+                csv_content=csv_base64  # Store CSV for preview
+            )
+        else:
+            logger.info(f"No duplicate found, proceeding with new upload creation")
+            upload = SalesOrderUpload(
+                id=upload_id,
+                user_id=None,  # Webhook has no user context
+                client_id=client_id_for_upload,  # May be None for standalone connections
+                client_erp_credentials_id=client_erp_credentials_id,  # Store credentials ID for retry
+                filename=filename,
+                total_rows=0,  # Will be updated after parsing
+                successful_orders=0,
+                failed_orders=0,
+                status='processing',
+                csv_content=csv_base64  # Store CSV for preview
+            )
         db.session.add(upload)
         try:
             db.session.commit()
-            logger.info(f"Upload record created successfully - upload_id: {upload_id}")
+            logger.info(f"Upload record created successfully - upload_id: {upload_id}, is_duplicate: {is_duplicate}")
         except Exception as commit_error:
             logger.error(f"Failed to commit upload record - upload_id: {upload_id}, error: {str(commit_error)}", exc_info=True)
             db.session.rollback()
             raise
         
+        # If duplicate, return early without processing
+        if is_duplicate:
+            return jsonify({
+                'message': 'This file was already processed recently',
+                'upload_id': str(upload_id),
+                'duplicate_of_upload_id': str(recent_duplicate.id),
+                'status': 'duplicate',
+                'created_at': upload.created_at.isoformat() if upload.created_at else None,
+                'duplicate': True
+            }), 200  # Return 200 to prevent Missive from retrying
+        
         # Return 200 immediately to acknowledge webhook receipt
         # Process CSV in background thread
         def process_in_background():
             """Process CSV in background thread"""
+            app = None
             try:
+                logger.info(f"Starting background processing for upload {upload_id}")
                 # Create new database session for background thread
                 from app import create_app
                 app = create_app('production' if os.environ.get('FLASK_ENV') == 'production' else 'development')
                 with app.app_context():
-                    result = process_webhook_csv(
-                        upload_id=upload_id,
-                        client_erp_credentials_id=client_erp_credentials_id,
-                        csv_content=csv_content,
-                        filename=filename
-                    )
-                    
-                    upload = SalesOrderUpload.query.get(upload_id)
-                    if upload:
-                        if 'error' in result:
-                            upload.status = 'failed'
-                            upload.error_log = [result.get('error')]
-                            upload.completed_at = datetime.utcnow()
+                    try:
+                        result = process_webhook_csv(
+                            upload_id=upload_id,
+                            client_erp_credentials_id=client_erp_credentials_id,
+                            csv_content=csv_content,
+                            filename=filename
+                        )
+                        
+                        upload = SalesOrderUpload.query.get(upload_id)
+                        if upload:
+                            if 'error' in result:
+                                logger.error(f"Processing error for upload {upload_id}: {result.get('error')}")
+                                upload.status = 'failed'
+                                upload.error_log = [result.get('error')]
+                                upload.completed_at = datetime.utcnow()
+                            else:
+                                # Check if there are any failed orders
+                                failed_count = result.get('failed', 0)
+                                upload.status = 'completed' if failed_count == 0 else 'failed'
+                                upload.completed_at = datetime.utcnow()
+                            db.session.commit()
+                            logger.info(f"Background processing completed - upload_id: {upload_id}, client: {client_name}, orders: {result.get('total_orders', 0)}, successful: {result.get('successful', 0)}, failed: {result.get('failed', 0)}")
                         else:
-                            # Check if there are any failed orders
-                            failed_count = result.get('failed', 0)
-                            upload.status = 'completed' if failed_count == 0 else 'failed'
-                            upload.completed_at = datetime.utcnow()
-                        db.session.commit()
-                        logger.info(f"Background processing completed - upload_id: {upload_id}, client: {client_name}, orders: {result.get('total_orders', 0)}, successful: {result.get('successful', 0)}, failed: {result.get('failed', 0)}")
+                            logger.error(f"Upload {upload_id} not found in database during background processing")
+                    except Exception as process_error:
+                        logger.error(f"Error in process_webhook_csv for upload {upload_id}: {str(process_error)}", exc_info=True)
+                        try:
+                            upload = SalesOrderUpload.query.get(upload_id)
+                            if upload:
+                                upload.status = 'failed'
+                                upload.error_log = [f'Processing error: {str(process_error)}']
+                                upload.completed_at = datetime.utcnow()
+                                db.session.commit()
+                        except Exception as db_error:
+                            logger.error(f"Error updating upload status after process error: {str(db_error)}", exc_info=True)
+                            raise
+                        raise
+                    finally:
+                        # Ensure session is closed and connections are returned to pool
+                        db.session.close()
             except Exception as e:
-                logger.error(f"Error in background processing for upload {upload_id}: {str(e)}", exc_info=True)
-                try:
-                    upload = SalesOrderUpload.query.get(upload_id)
-                    if upload:
-                        upload.status = 'failed'
-                        upload.error_log = [f'Background processing error: {str(e)}']
-                        upload.completed_at = datetime.utcnow()
-                        db.session.commit()
-                except Exception as db_error:
-                    logger.error(f"Error updating upload status: {str(db_error)}", exc_info=True)
+                logger.error(f"Error in background processing thread for upload {upload_id}: {str(e)}", exc_info=True)
+                # Try to update upload status, but don't create another app instance if we already have one
+                if app:
+                    try:
+                        with app.app_context():
+                            upload = SalesOrderUpload.query.get(upload_id)
+                            if upload:
+                                upload.status = 'failed'
+                                error_msg = str(e)[:500]  # Limit error message length
+                                upload.error_log = [f'Background processing thread error: {error_msg}']
+                                upload.completed_at = datetime.utcnow()
+                                db.session.commit()
+                                logger.info(f"Updated upload {upload_id} status to failed due to thread error")
+                            db.session.close()
+                    except Exception as db_error:
+                        logger.error(f"Error updating upload status: {str(db_error)}", exc_info=True)
+            finally:
+                # Dispose of the engine to close all connections from this app instance
+                if app and hasattr(app, 'extensions') and 'sqlalchemy' in app.extensions:
+                    try:
+                        db.engine.dispose()
+                        logger.debug(f"Disposed database engine for background thread {upload_id}")
+                    except Exception as dispose_error:
+                        logger.warning(f"Error disposing database engine: {str(dispose_error)}")
         
         # Start background processing
+        logger.info(f"Starting background thread for upload {upload_id}")
         thread = threading.Thread(target=process_in_background, daemon=True)
         thread.start()
+        logger.info(f"Background thread started for upload {upload_id}")
         
         logger.info(f"Webhook received and queued for processing - upload_id: {upload_id}, client: {client_name}, filename: {filename}")
         

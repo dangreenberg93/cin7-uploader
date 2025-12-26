@@ -22,6 +22,13 @@ def create_app(config_name=None):
     # Configure database
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['DATABASE_URL']
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    # Configure connection pool to limit connections per app instance
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_size': 5,  # Limit connections per app instance
+        'max_overflow': 10,  # Allow up to 10 additional connections beyond pool_size
+        'pool_pre_ping': True,  # Verify connections before using them
+        'pool_recycle': 3600,  # Recycle connections after 1 hour
+    }
     
     # Initialize database connection
     from database import db

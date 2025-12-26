@@ -117,6 +117,8 @@ const QueueView = () => {
         return <Badge variant="default" className="bg-blue-500">Processing</Badge>;
       case 'failed':
         return <Badge variant="destructive">Failed</Badge>;
+      case 'duplicate':
+        return <Badge variant="secondary" className="bg-yellow-500 text-white">Duplicate</Badge>;
       default:
         return <Badge variant="secondary">{status}</Badge>;
     }
@@ -582,6 +584,40 @@ const QueueView = () => {
                         <TableRow>
                           <TableCell colSpan={7} className="bg-muted/30">
                             <div className="p-3 space-y-3">
+                              {/* Duplicate Message */}
+                              {upload.status === 'duplicate' && upload.error_log && upload.error_log.length > 0 && (
+                                <div className="bg-yellow-50 border border-yellow-200 rounded p-3 mb-3">
+                                  <div className="flex items-start gap-2">
+                                    <AlertCircle className="h-4 w-4 text-yellow-600 mt-0.5" />
+                                    <div className="flex-1">
+                                      <div className="font-semibold text-sm text-yellow-800 mb-1">Duplicate Upload Detected</div>
+                                      {upload.error_log[0] && typeof upload.error_log[0] === 'object' && (
+                                        <div className="text-xs text-yellow-700 space-y-1">
+                                          <div>{upload.error_log[0].message || 'This file was already processed recently'}</div>
+                                          {upload.error_log[0].duplicate_of_upload_id && (
+                                            <div>
+                                              Original upload ID: <span className="font-mono">{upload.error_log[0].duplicate_of_upload_id}</span>
+                                            </div>
+                                          )}
+                                          {upload.error_log[0].duplicate_of_created_at && (
+                                            <div>
+                                              Original upload time: {formatDate(upload.error_log[0].duplicate_of_created_at)}
+                                            </div>
+                                          )}
+                                          {upload.error_log[0].duplicate_of_status && (
+                                            <div>
+                                              Original status: <Badge variant="secondary" className="ml-1">{upload.error_log[0].duplicate_of_status}</Badge>
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                      {typeof upload.error_log[0] === 'string' && (
+                                        <div className="text-xs text-yellow-700">{upload.error_log[0]}</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
                               {/* Successful Orders */}
                               {successfulOrders.length > 0 && (
                                 <div>
@@ -921,8 +957,7 @@ const QueueView = () => {
                         <TableHead>Order</TableHead>
                         <TableHead>Customer</TableHead>
                         <TableHead>PO #</TableHead>
-                        <TableHead>Sale ID</TableHead>
-                        <TableHead>Sale Order ID</TableHead>
+                        <TableHead>Open in Cin7</TableHead>
                         <TableHead>Source Upload</TableHead>
                         <TableHead>Completed At</TableHead>
                       </TableRow>
@@ -992,24 +1027,15 @@ const QueueView = () => {
                                 setExpandedCompletedOrders(newExpanded);
                               }}>
                                 {order.sale_id ? (
-                                  <Badge variant="default" className="bg-green-500 text-white font-mono text-xs">
-                                    {order.sale_id.substring(0, 8)}...
-                                  </Badge>
-                                ) : '-'}
-                              </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
-                                {order.sale_order_id ? (
-                                  <Badge variant="default" className="bg-green-500 text-white font-mono text-xs">
-                                    {order.sale_order_id.substring(0, 8)}...
-                                  </Badge>
+                                  <a
+                                    href={`https://inventory.dearsystems.com/Sale#${order.sale_id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                                  >
+                                    Open in Cin7
+                                  </a>
                                 ) : '-'}
                               </TableCell>
                               <TableCell onClick={() => {
