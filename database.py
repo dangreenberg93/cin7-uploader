@@ -133,7 +133,7 @@ class SalesOrderUpload(db.Model):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)  # Nullable for webhook uploads
     client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=True, index=True)  # Nullable for standalone connections
-    client_erp_credentials_id = Column(UUID(as_uuid=True), ForeignKey('voyager.client_erp_credentials.id'), nullable=True, index=True)  # Store credentials ID for retry
+    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # Store credentials ID for retry (FK constraint exists in DB, not in ORM)
     filename = Column(String(500), nullable=False)
     total_rows = Column(Integer, nullable=False)
     successful_orders = Column(Integer, default=0, nullable=False)
