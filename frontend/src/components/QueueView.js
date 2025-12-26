@@ -907,32 +907,6 @@ const QueueView = () => {
           <TabsContent value="completed">
             {/* Completed Orders View */}
             <div className="space-y-4">
-              {/* Summary Stats */}
-              <div className="grid grid-cols-3 gap-4">
-                <Card>
-                  <CardContent className="p-4">
-                    <div className="text-sm text-muted-foreground">Total Completed</div>
-                    <div className="text-2xl font-bold text-green-600">{completedOrders.length}</div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="p-4">
-                    <div className="text-sm text-muted-foreground">With Sale IDs</div>
-                    <div className="text-2xl font-bold">
-                      {completedOrders.filter(o => o.sale_id).length}
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardContent className="p-4">
-                    <div className="text-sm text-muted-foreground">With Sale Order IDs</div>
-                    <div className="text-2xl font-bold">
-                      {completedOrders.filter(o => o.sale_order_id).length}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-
               {/* Completed Orders Table */}
               <div className="overflow-x-auto">
                 {completedOrdersLoading ? (

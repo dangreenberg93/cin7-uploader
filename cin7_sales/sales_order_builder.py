@@ -64,11 +64,17 @@ class SalesOrderBuilder:
             'Type': sale_type_value  # Set Type based on client settings: "Advanced Sale" or "Simple Sale"
         }
         
-        # Customer - prioritize lookup by name to get IDs
+        # Customer - prioritize lookup by AdditionalAttribute1 first, then by name to get IDs
         customer_data = None
+        
+        # Extract AdditionalAttribute1 from mapped data if available
+        additional_attribute1 = None
+        if 'AdditionalAttribute1' in mapped and mapped['AdditionalAttribute1']:
+            additional_attribute1 = str(mapped['AdditionalAttribute1']).strip()
+        
         if 'CustomerName' in mapped and mapped['CustomerName']:
-            # Lookup customer by name to get CustomerID, ShippingAddressID, BillingAddressID
-            customer_data = self._lookup_customer_by_name(mapped['CustomerName'])
+            # Lookup customer by AdditionalAttribute1 first (if provided), then by name to get CustomerID, ShippingAddressID, BillingAddressID
+            customer_data = self._lookup_customer_by_name(mapped['CustomerName'], additional_attribute1=additional_attribute1)
             if customer_data:
                 sale['CustomerID'] = customer_data.get('ID')
                 # Don't set default shipping address here - will be handled by CSV mapping below if provided
@@ -225,10 +231,6 @@ class SalesOrderBuilder:
             else:
                 sale['SaleDate'] = mapped['SaleDate']
         
-        # AdditionalAttribute1
-        if 'AdditionalAttribute1' in mapped and mapped['AdditionalAttribute1']:
-            sale['AdditionalAttribute1'] = str(mapped['AdditionalAttribute1']).strip()
-        
         return sale
     
     def build_sale_order_from_rows(self, rows: List[Dict[str, Any]], column_mapping: Dict[str, str], sale_id: str) -> Dict[str, Any]:
@@ -354,48 +356,75 @@ class SalesOrderBuilder:
         
         return sale_order
     
-    def _lookup_customer_by_name(self, customer_name: str) -> Optional[Dict[str, Any]]:
+    def _lookup_customer_by_name(self, customer_name: str, additional_attribute1: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
-        Lookup customer by name and return customer data with shipping/billing IDs.
+        Lookup customer by additional attribute first, then by name, and return customer data with shipping/billing IDs.
         
         Args:
-            customer_name: Customer name to lookup
+            customer_name: Customer name to lookup (fallback)
+            additional_attribute1: Additional Attribute 1 value to search by first (priority)
         
         Returns:
             Customer data dictionary or None
         """
-        if not customer_name:
-            return None
+        # Create cache key that includes both name and additional attribute
+        cache_key = f"{customer_name}|{additional_attribute1}"
         
         # Check cache first
-        if customer_name in self._customer_cache:
-            return self._customer_cache[customer_name]
+        if cache_key in self._customer_cache:
+            return self._customer_cache[cache_key]
         
         # Check preloaded data first (avoid API calls)
-        if self.preloaded_customers and customer_name:
-            customer_name_clean = customer_name.strip() if customer_name else None
-            if customer_name_clean:
-                customer = (self.preloaded_customers.get(customer_name_clean) or 
-                           self.preloaded_customers.get(customer_name_clean.upper()) or
-                           self.preloaded_customers.get(customer_name_clean.lower()))
-            else:
-                customer = None
+        if self.preloaded_customers:
+            customer = None
+            
+            # First, try to find by AdditionalAttribute1 if provided
+            if additional_attribute1:
+                attr1_clean = str(additional_attribute1).strip() if additional_attribute1 else None
+                if attr1_clean:
+                    attr1_key = f"_attr1:{attr1_clean}"
+                    customer = (self.preloaded_customers.get(attr1_key) or
+                               self.preloaded_customers.get(f"_attr1:{attr1_clean.upper()}") or
+                               self.preloaded_customers.get(f"_attr1:{attr1_clean.lower()}"))
+            
+            # If not found by AdditionalAttribute1, try by name
+            if not customer and customer_name:
+                customer_name_clean = customer_name.strip() if customer_name else None
+                if customer_name_clean:
+                    customer = (self.preloaded_customers.get(customer_name_clean) or 
+                               self.preloaded_customers.get(customer_name_clean.upper()) or
+                               self.preloaded_customers.get(customer_name_clean.lower()))
+            
             if customer:
-                self._customer_cache[customer_name] = customer
+                self._customer_cache[cache_key] = customer
                 return customer
         
         # Only fallback to API if NOT preloaded (to avoid individual API calls)
         if self.api_client and not self.preloaded_customers:
-            customers = self.api_client.search_customer(name=customer_name)
+            # Try searching by AdditionalAttribute1 first if provided
+            # Note: API may not support direct AdditionalAttribute1 search, so we'll search by name and filter
+            customers = None
+            if additional_attribute1:
+                # Get all customers and filter by AdditionalAttribute1
+                all_customers = self.api_client.get_all_customers()
+                if all_customers:
+                    attr1_clean = str(additional_attribute1).strip().lower()
+                    customers = [c for c in all_customers 
+                                if c.get('AdditionalAttribute1') and 
+                                str(c.get('AdditionalAttribute1')).strip().lower() == attr1_clean]
+            
+            # If no match by AdditionalAttribute1, search by name
+            if not customers and customer_name:
+                customers = self.api_client.search_customer(name=customer_name)
             
             if customers and len(customers) > 0:
                 # Use first match
                 customer = customers[0]
-                self._customer_cache[customer_name] = customer
+                self._customer_cache[cache_key] = customer
                 return customer
         
         # Cache None to avoid repeated lookups
-        self._customer_cache[customer_name] = None
+        self._customer_cache[cache_key] = None
         return None
     
     def _build_lines(self, row_data: Dict[str, Any], column_mapping: Dict[str, str]) -> List[Dict[str, Any]]:

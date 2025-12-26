@@ -564,6 +564,232 @@ def validate_data():
         'product_count': product_count
     }), 200
 
+@sales_bp.route('/refresh-cache', methods=['POST'])
+@jwt_required()
+def refresh_cache():
+    """
+    Force refresh of customer and product cache by fetching latest data from Cin7.
+    This is useful after adding new customers or products in Cin7.
+    Returns the count of customers and products loaded.
+    """
+    logger = logging.getLogger(__name__)
+    user_id = get_user_id()
+    if not user_id:
+        return jsonify({'error': 'Invalid user ID format'}), 400
+    
+    data = request.get_json() or {}
+    client_id = data.get('client_id') or data.get('client_erp_credentials_id')
+    
+    if not client_id:
+        return jsonify({'error': 'client_id or client_erp_credentials_id is required'}), 400
+    
+    try:
+        client_uuid = uuid.UUID(client_id)
+    except (ValueError, AttributeError):
+        return jsonify({'error': 'Invalid client ID format'}), 400
+    
+    try:
+        # Get credentials from voyager.client_erp_credentials
+        query = text("""
+            SELECT 
+                cec.id,
+                cec.cin7_api_auth_accountid as account_id,
+                cec.cin7_api_auth_applicationkey as application_key
+            FROM voyager.client_erp_credentials cec
+            WHERE cec.erp = 'cin7_core'
+            AND (cec.id = :client_id OR cec.client_id = :client_id)
+            LIMIT 1
+        """)
+        result = db.session.execute(query, {'client_id': client_uuid})
+        cred_row = result.fetchone()
+        
+        if not cred_row or not cred_row.account_id or not cred_row.application_key:
+            return jsonify({'error': 'Cin7 credentials not found'}), 404
+        
+        # Create API client
+        api_client = Cin7SalesAPI(
+            account_id=str(cred_row.account_id),
+            application_key=str(cred_row.application_key),
+            base_url='https://inventory.dearsystems.com/ExternalApi/v2/'
+        )
+        
+        # Create validator and preload data (this fetches fresh data from Cin7)
+        validator = SalesOrderValidator(api_client)
+        logger.info("Refreshing customer and product cache...")
+        customer_count, product_count = validator.preload_customers_and_products()
+        logger.info(f"Cache refreshed: {customer_count} customers, {product_count} products")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Cache refreshed successfully',
+            'customer_count': customer_count,
+            'product_count': product_count
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error refreshing cache: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Failed to refresh cache: {str(e)}'}), 500
+
+@sales_bp.route('/cached-customers', methods=['GET'])
+@jwt_required()
+def get_cached_customers():
+    """
+    Get cached customers from Cin7 for the selected client.
+    Returns a list of customers with search/filter support.
+    """
+    logger = logging.getLogger(__name__)
+    user_id = get_user_id()
+    if not user_id:
+        return jsonify({'error': 'Invalid user ID format'}), 400
+    
+    client_id = request.args.get('client_id')
+    search_query = request.args.get('search', '').strip().lower()
+    
+    if not client_id:
+        return jsonify({'error': 'client_id is required'}), 400
+    
+    try:
+        client_uuid = uuid.UUID(client_id)
+    except (ValueError, AttributeError):
+        return jsonify({'error': 'Invalid client ID format'}), 400
+    
+    try:
+        # Get credentials from voyager.client_erp_credentials
+        query = text("""
+            SELECT 
+                cec.id,
+                cec.cin7_api_auth_accountid as account_id,
+                cec.cin7_api_auth_applicationkey as application_key
+            FROM voyager.client_erp_credentials cec
+            WHERE cec.erp = 'cin7_core'
+            AND (cec.id = :client_id OR cec.client_id = :client_id)
+            LIMIT 1
+        """)
+        result = db.session.execute(query, {'client_id': client_uuid})
+        cred_row = result.fetchone()
+        
+        if not cred_row or not cred_row.account_id or not cred_row.application_key:
+            return jsonify({'error': 'Cin7 credentials not found'}), 404
+        
+        # Create API client
+        api_client = Cin7SalesAPI(
+            account_id=str(cred_row.account_id),
+            application_key=str(cred_row.application_key),
+            base_url='https://inventory.dearsystems.com/ExternalApi/v2/'
+        )
+        
+        # Get all customers from Cin7
+        customers = api_client.get_all_customers()
+        
+        # Filter customers if search query provided
+        if search_query:
+            customers = [
+                c for c in customers
+                if (c.get('Name', '').lower().find(search_query) >= 0 or
+                    c.get('Email', '').lower().find(search_query) >= 0 or
+                    (c.get('AdditionalAttribute1') and str(c.get('AdditionalAttribute1', '')).lower().find(search_query) >= 0))
+            ]
+        
+        # Format customers for frontend (only include relevant fields)
+        formatted_customers = []
+        for customer in customers:
+            formatted_customers.append({
+                'id': customer.get('ID'),
+                'name': customer.get('Name'),
+                'email': customer.get('Email'),
+                'additional_attribute1': customer.get('AdditionalAttribute1'),
+                'status': customer.get('Status'),
+                'currency': customer.get('Currency')
+            })
+        
+        return jsonify({
+            'customers': formatted_customers,
+            'total': len(formatted_customers)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting cached customers: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Failed to get customers: {str(e)}'}), 500
+
+@sales_bp.route('/cached-products', methods=['GET'])
+@jwt_required()
+def get_cached_products():
+    """
+    Get cached products from Cin7 for the selected client.
+    Returns a list of products with search/filter support.
+    """
+    logger = logging.getLogger(__name__)
+    user_id = get_user_id()
+    if not user_id:
+        return jsonify({'error': 'Invalid user ID format'}), 400
+    
+    client_id = request.args.get('client_id')
+    search_query = request.args.get('search', '').strip().lower()
+    
+    if not client_id:
+        return jsonify({'error': 'client_id is required'}), 400
+    
+    try:
+        client_uuid = uuid.UUID(client_id)
+    except (ValueError, AttributeError):
+        return jsonify({'error': 'Invalid client ID format'}), 400
+    
+    try:
+        # Get credentials from voyager.client_erp_credentials
+        query = text("""
+            SELECT 
+                cec.id,
+                cec.cin7_api_auth_accountid as account_id,
+                cec.cin7_api_auth_applicationkey as application_key
+            FROM voyager.client_erp_credentials cec
+            WHERE cec.erp = 'cin7_core'
+            AND (cec.id = :client_id OR cec.client_id = :client_id)
+            LIMIT 1
+        """)
+        result = db.session.execute(query, {'client_id': client_uuid})
+        cred_row = result.fetchone()
+        
+        if not cred_row or not cred_row.account_id or not cred_row.application_key:
+            return jsonify({'error': 'Cin7 credentials not found'}), 404
+        
+        # Create API client
+        api_client = Cin7SalesAPI(
+            account_id=str(cred_row.account_id),
+            application_key=str(cred_row.application_key),
+            base_url='https://inventory.dearsystems.com/ExternalApi/v2/'
+        )
+        
+        # Get all products from Cin7
+        products = api_client.get_all_products()
+        
+        # Filter products if search query provided
+        if search_query:
+            products = [
+                p for p in products
+                if (p.get('SKU', '').lower().find(search_query) >= 0 or
+                    p.get('Name', '').lower().find(search_query) >= 0)
+            ]
+        
+        # Format products for frontend (only include relevant fields)
+        formatted_products = []
+        for product in products:
+            formatted_products.append({
+                'id': product.get('ID'),
+                'sku': product.get('SKU'),
+                'name': product.get('Name'),
+                'barcode': product.get('Barcode'),
+                'status': product.get('Status')
+            })
+        
+        return jsonify({
+            'products': formatted_products,
+            'total': len(formatted_products)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting cached products: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Failed to get products: {str(e)}'}), 500
+
 @sales_bp.route('/create', methods=['POST'])
 @jwt_required()
 def create_sales_orders():

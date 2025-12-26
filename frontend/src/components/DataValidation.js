@@ -12,9 +12,35 @@ import { useClient } from '../contexts/ClientContext';
 const DataValidation = ({ sessionId, onValidationComplete }) => {
   const { selectedClientId } = useClient();
   const [validating, setValidating] = useState(false);
+  const [refreshingCache, setRefreshingCache] = useState(false);
   const [validationResults, setValidationResults] = useState(null);
   const [expandedRows, setExpandedRows] = useState(new Set());
   const [showPayloadRows, setShowPayloadRows] = useState(new Set());
+
+  const refreshCache = async () => {
+    if (!selectedClientId) {
+      toast.error('Please select a client');
+      return;
+    }
+
+    setRefreshingCache(true);
+    toast.info('Refreshing customer and product cache from Cin7...', { duration: 3000 });
+
+    try {
+      const response = await axios.post('/sales/refresh-cache', { 
+        client_id: selectedClientId 
+      });
+
+      toast.success(
+        `Cache refreshed: ${response.data.customer_count} customers, ${response.data.product_count} products`,
+        { duration: 5000 }
+      );
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to refresh cache');
+    } finally {
+      setRefreshingCache(false);
+    }
+  };
 
   const validateData = async () => {
     if (!sessionId) {
@@ -341,19 +367,39 @@ const DataValidation = ({ sessionId, onValidationComplete }) => {
                 Validate CSV data against Cin7 API before creating sales orders
               </CardDescription>
             </div>
-            <Button onClick={validateData} disabled={validating}>
-              {validating ? (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                  Validating...
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                  Validate Data
-                </>
-              )}
-            </Button>
+            <div className="flex gap-2">
+              <Button 
+                onClick={refreshCache} 
+                disabled={refreshingCache}
+                variant="outline"
+                title="Refresh customer and product cache from Cin7"
+              >
+                {refreshingCache ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                    Refreshing...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Refresh Cache
+                  </>
+                )}
+              </Button>
+              <Button onClick={validateData} disabled={validating}>
+                {validating ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                    Validating...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Validate Data
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>

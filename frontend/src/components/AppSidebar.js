@@ -128,18 +128,18 @@ export function AppSidebar({ user, onLogout }) {
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/'}>
-                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
-                    <ShoppingCart />
-                    <span>Sales Orders</span>
-                  </a>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
                 <SidebarMenuButton asChild isActive={location.pathname === '/queue'}>
                   <a href="#" onClick={(e) => { e.preventDefault(); navigate('/queue'); }}>
                     <List />
                     <span>Queue</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild isActive={location.pathname === '/'}>
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
+                    <ShoppingCart />
+                    <span>New Order Upload</span>
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>

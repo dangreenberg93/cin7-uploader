@@ -7,7 +7,9 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Loader2 } from 'lucide-react';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+import { Loader2, RefreshCw, Search } from 'lucide-react';
 
 const Cin7Settings = () => {
   const { selectedClientId, selectedClient } = useClient();
@@ -29,6 +31,16 @@ const Cin7Settings = () => {
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [loadingTaxRules, setLoadingTaxRules] = useState(false);
   const [loadingAttributeSets, setLoadingAttributeSets] = useState(false);
+  
+  // Cached customers and products
+  const [customers, setCustomers] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [productSearchQuery, setProductSearchQuery] = useState('');
+  const [refreshingCache, setRefreshingCache] = useState(false);
+  
   // Track original values to detect changes
   const [originalValues, setOriginalValues] = useState({
     defaultStatus: 'DRAFT',
@@ -120,6 +132,14 @@ const Cin7Settings = () => {
         await loadAttributeSets();
       } catch (attrError) {
         console.error('Failed to load attribute sets (non-fatal):', attrError);
+      }
+      
+      // Load cached customers and products
+      try {
+        await loadCachedCustomers();
+        await loadCachedProducts();
+      } catch (cacheError) {
+        console.error('Failed to load cached data (non-fatal):', cacheError);
       }
       
       // Store original values for change detection
@@ -226,6 +246,92 @@ const Cin7Settings = () => {
       setLoadingAttributeSets(false);
     }
   };
+
+  const loadCachedCustomers = async () => {
+    if (!selectedClientId) return;
+
+    setLoadingCustomers(true);
+    try {
+      const response = await axios.get(`/sales/cached-customers`, {
+        params: {
+          client_id: selectedClientId,
+          search: customerSearchQuery
+        }
+      });
+      setCustomers(response.data.customers || []);
+    } catch (error) {
+      console.error('Failed to load cached customers:', error);
+      setCustomers([]);
+    } finally {
+      setLoadingCustomers(false);
+    }
+  };
+
+  const loadCachedProducts = async () => {
+    if (!selectedClientId) return;
+
+    setLoadingProducts(true);
+    try {
+      const response = await axios.get(`/sales/cached-products`, {
+        params: {
+          client_id: selectedClientId,
+          search: productSearchQuery
+        }
+      });
+      setProducts(response.data.products || []);
+    } catch (error) {
+      console.error('Failed to load cached products:', error);
+      setProducts([]);
+    } finally {
+      setLoadingProducts(false);
+    }
+  };
+
+  const refreshCache = async () => {
+    if (!selectedClientId) {
+      toast.error('Please select a client');
+      return;
+    }
+
+    setRefreshingCache(true);
+    try {
+      const response = await axios.post('/sales/refresh-cache', { 
+        client_id: selectedClientId 
+      });
+
+      toast.success(
+        `Cache refreshed: ${response.data.customer_count} customers, ${response.data.product_count} products`,
+        { duration: 5000 }
+      );
+
+      // Reload cached data
+      await loadCachedCustomers();
+      await loadCachedProducts();
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to refresh cache');
+    } finally {
+      setRefreshingCache(false);
+    }
+  };
+
+  // Debounce search queries
+  useEffect(() => {
+    if (!selectedClientId) return;
+    const timer = setTimeout(() => {
+      loadCachedCustomers();
+    }, 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerSearchQuery, selectedClientId]);
+
+  useEffect(() => {
+    if (!selectedClientId) return;
+    const timer = setTimeout(() => {
+      loadCachedProducts();
+    }, 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productSearchQuery, selectedClientId]);
 
   const handleSave = async () => {
     if (!selectedClientId) {
@@ -522,6 +628,148 @@ const Cin7Settings = () => {
                 )}
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-sm">Cached Data from Cin7</CardTitle>
+                <CardDescription className="text-xs">
+                  View and search customers and products loaded from Cin7
+                </CardDescription>
+              </div>
+              <Button
+                onClick={refreshCache}
+                disabled={refreshingCache}
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+              >
+                {refreshingCache ? (
+                  <>
+                    <RefreshCw className="w-3 h-3 mr-2 animate-spin" />
+                    Refreshing...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-3 h-3 mr-2" />
+                    Refresh Cache
+                  </>
+                )}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <Tabs defaultValue="customers" className="w-full">
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="customers">Customers</TabsTrigger>
+                <TabsTrigger value="products">Products</TabsTrigger>
+              </TabsList>
+              
+              <TabsContent value="customers" className="space-y-4">
+                <div className="relative">
+                  <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search customers by name, email, or Additional Attribute 1..."
+                    value={customerSearchQuery}
+                    onChange={(e) => setCustomerSearchQuery(e.target.value)}
+                    className="pl-8 h-8 text-xs"
+                  />
+                </div>
+                <div className="border rounded-md max-h-[500px] overflow-auto">
+                  {loadingCustomers ? (
+                    <div className="p-8 text-center">
+                      <Loader2 className="w-4 h-4 animate-spin mx-auto text-muted-foreground" />
+                      <p className="text-xs text-muted-foreground mt-2">Loading customers...</p>
+                    </div>
+                  ) : customers.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-muted-foreground">
+                      {customerSearchQuery ? 'No customers found matching your search' : 'No customers loaded. Click "Refresh Cache" to load customers from Cin7.'}
+                    </div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">Name</TableHead>
+                          <TableHead className="text-xs">Email</TableHead>
+                          <TableHead className="text-xs">Additional Attribute 1</TableHead>
+                          <TableHead className="text-xs">Status</TableHead>
+                          <TableHead className="text-xs">Currency</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {customers.map((customer) => (
+                          <TableRow key={customer.id}>
+                            <TableCell className="text-xs font-medium">{customer.name || '-'}</TableCell>
+                            <TableCell className="text-xs">{customer.email || '-'}</TableCell>
+                            <TableCell className="text-xs">{customer.additional_attribute1 || '-'}</TableCell>
+                            <TableCell className="text-xs">{customer.status || '-'}</TableCell>
+                            <TableCell className="text-xs">{customer.currency || '-'}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
+                {!loadingCustomers && customers.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Showing {customers.length} customer{customers.length !== 1 ? 's' : ''}
+                  </p>
+                )}
+              </TabsContent>
+              
+              <TabsContent value="products" className="space-y-4">
+                <div className="relative">
+                  <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search products by SKU or name..."
+                    value={productSearchQuery}
+                    onChange={(e) => setProductSearchQuery(e.target.value)}
+                    className="pl-8 h-8 text-xs"
+                  />
+                </div>
+                <div className="border rounded-md max-h-[500px] overflow-auto">
+                  {loadingProducts ? (
+                    <div className="p-8 text-center">
+                      <Loader2 className="w-4 h-4 animate-spin mx-auto text-muted-foreground" />
+                      <p className="text-xs text-muted-foreground mt-2">Loading products...</p>
+                    </div>
+                  ) : products.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-muted-foreground">
+                      {productSearchQuery ? 'No products found matching your search' : 'No products loaded. Click "Refresh Cache" to load products from Cin7.'}
+                    </div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">SKU</TableHead>
+                          <TableHead className="text-xs">Name</TableHead>
+                          <TableHead className="text-xs">Barcode</TableHead>
+                          <TableHead className="text-xs">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {products.map((product) => (
+                          <TableRow key={product.id}>
+                            <TableCell className="text-xs font-medium">{product.sku || '-'}</TableCell>
+                            <TableCell className="text-xs">{product.name || '-'}</TableCell>
+                            <TableCell className="text-xs">{product.barcode || '-'}</TableCell>
+                            <TableCell className="text-xs">{product.status || '-'}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
+                {!loadingProducts && products.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Showing {products.length} product{products.length !== 1 ? 's' : ''}
+                  </p>
+                )}
+              </TabsContent>
+            </Tabs>
           </CardContent>
         </Card>
         </>

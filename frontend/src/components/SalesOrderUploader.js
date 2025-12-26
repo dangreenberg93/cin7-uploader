@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Badge } from './ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
-import { Upload, FileText, CheckCircle2, Check, XCircle, Loader2, Play, AlertCircle, Settings, Map, Code2, RotateCcw } from 'lucide-react';
+import { Upload, FileText, CheckCircle2, Check, XCircle, Loader2, Play, AlertCircle, Settings, Map, Code2, RotateCcw, RefreshCw } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { cn } from '../lib/utils';
 import { useClient } from '../contexts/ClientContext';
@@ -66,6 +66,7 @@ const SalesOrderUploader = ({ user }) => {
   
   // Validation state
   const [validating, setValidating] = useState(false);
+  const [refreshingCache, setRefreshingCache] = useState(false);
   const [validationResults, setValidationResults] = useState(() => {
     const saved = localStorage.getItem('salesOrderUploader_validationResults');
     return saved ? JSON.parse(saved) : null;
@@ -409,6 +410,38 @@ const SalesOrderUploader = ({ user }) => {
   const loadTemplate = (template) => {
     setColumnMapping(template.column_mapping);
     toast.success(`Loaded template: ${template.name}`);
+  };
+
+  const refreshCache = async () => {
+    if (!selectedClientId) {
+      toast.error('Please select a client');
+      return;
+    }
+
+    if (!connected) {
+      toast.error('Please ensure Cin7 connection is established');
+      return;
+    }
+
+    setRefreshingCache(true);
+    addTerminalLine('info', 'Refreshing customer and product cache from Cin7...');
+
+    try {
+      const response = await axios.post('/sales/refresh-cache', { 
+        client_id: selectedClientId 
+      });
+
+      addTerminalLine('success', `Cache refreshed: ${response.data.customer_count} customers, ${response.data.product_count} products`);
+      toast.success(
+        `Cache refreshed: ${response.data.customer_count} customers, ${response.data.product_count} products`,
+        { duration: 5000 }
+      );
+    } catch (error) {
+      addTerminalLine('error', `Cache refresh failed: ${error.response?.data?.error || error.message}`);
+      toast.error(error.response?.data?.error || 'Failed to refresh cache');
+    } finally {
+      setRefreshingCache(false);
+    }
   };
 
   const validateData = async () => {
@@ -1433,6 +1466,24 @@ const SalesOrderUploader = ({ user }) => {
         {/* Action Buttons */}
         {csvColumns.length > 0 && !validationResults && (
           <div className="flex gap-2 mt-6">
+            <Button
+              onClick={refreshCache}
+              disabled={refreshingCache || !connected}
+              variant="outline"
+              title="Refresh customer and product cache from Cin7"
+            >
+              {refreshingCache ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  Refreshing...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Refresh Cache
+                </>
+              )}
+            </Button>
             <Button
               onClick={validateData}
               disabled={validating || !connected}

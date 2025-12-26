@@ -58,48 +58,92 @@ class SalesOrderValidator:
         customer_id = mapped_data.get('CustomerID')
         shipping_address_str = mapped_data.get('ShippingAddress')  # Address string from CSV
         
+        # Extract AdditionalAttribute1 from mapped data if available
+        additional_attribute1 = mapped_data.get('AdditionalAttribute1')
+        if additional_attribute1:
+            additional_attribute1 = str(additional_attribute1).strip()
+        
         customer_match_result = None
         address_match_result = None
         needs_customer_creation = False
         needs_address_creation = False
         
         if customer_name:
-            # First try exact lookup
+            # First try lookup by AdditionalAttribute1 if provided, then by name
             customer = None
             if self.customers_loaded:
-                # Get all customer candidates for fuzzy matching
-                customer_candidates = []
-                for key, cust in self.customer_lookup.items():
-                    if isinstance(cust, dict) and cust.get('Name'):
-                        # Avoid duplicates (same customer may be stored multiple ways)
-                        if cust not in customer_candidates:
-                            customer_candidates.append(cust)
+                # First, try to find by AdditionalAttribute1 if provided
+                if additional_attribute1:
+                    attr1_key = f"_attr1:{additional_attribute1}"
+                    customer = (self.customer_lookup.get(attr1_key) or
+                               self.customer_lookup.get(f"_attr1:{additional_attribute1.upper()}") or
+                               self.customer_lookup.get(f"_attr1:{additional_attribute1.lower()}"))
                 
-                # Try fuzzy matching if we have candidates
-                if customer_candidates:
-                    customer_match_result = fuzzy_match_customer(customer_name, customer_candidates, threshold=0.85)
-                    if customer_match_result[0]:  # Found a match above threshold
-                        customer = customer_match_result[0]
+                # If not found by AdditionalAttribute1, get all customer candidates for fuzzy matching by name
+                if not customer:
+                    customer_candidates = []
+                    for key, cust in self.customer_lookup.items():
+                        # Skip attribute-based keys for name matching
+                        if key.startswith('_attr1:'):
+                            continue
+                        if isinstance(cust, dict) and cust.get('Name'):
+                            # Avoid duplicates (same customer may be stored multiple ways)
+                            if cust not in customer_candidates:
+                                customer_candidates.append(cust)
+                    
+                    # Try fuzzy matching if we have candidates
+                    if customer_candidates:
+                        customer_match_result = fuzzy_match_customer(customer_name, customer_candidates, threshold=0.85)
+                        if customer_match_result[0]:  # Found a match above threshold
+                            customer = customer_match_result[0]
+                        else:
+                            # No fuzzy match found - will need to create customer
+                            needs_customer_creation = True
                     else:
-                        # No fuzzy match found - will need to create customer
+                        # No customers loaded - will need to create
                         needs_customer_creation = True
                 else:
-                    # No customers loaded - will need to create
-                    needs_customer_creation = True
+                    # Found by AdditionalAttribute1 - create a match result for consistency
+                    # (exact match, so score is 1.0)
+                    customer_match_result = (customer, 1.0, [(customer, 1.0)])
             else:
                 # Not preloaded - try API search
-                customers = self.api_client.search_customer(name=customer_name)
+                # First try by AdditionalAttribute1 if provided
+                customers = None
+                if additional_attribute1:
+                    # Get all customers and filter by AdditionalAttribute1
+                    try:
+                        all_customers = self.api_client.get_all_customers()
+                        if all_customers:
+                            attr1_clean = additional_attribute1.strip().lower()
+                            customers = [c for c in all_customers 
+                                        if c.get('AdditionalAttribute1') and 
+                                        str(c.get('AdditionalAttribute1')).strip().lower() == attr1_clean]
+                    except Exception:
+                        # If get_all_customers fails, fall back to name search
+                        pass
+                
+                # If no match by AdditionalAttribute1, search by name
+                if not customers:
+                    customers = self.api_client.search_customer(name=customer_name)
+                
                 if customers and len(customers) > 0:
-                    # Use fuzzy matching on API results
-                    customer_match_result = fuzzy_match_customer(customer_name, customers, threshold=0.85)
-                    if customer_match_result[0]:
-                        customer = customer_match_result[0]
-                    elif len(customers) == 1:
-                        # Single result, use it even if below threshold
+                    # If we found by AdditionalAttribute1, use the first match directly
+                    if additional_attribute1 and customers:
                         customer = customers[0]
+                        # Create a match result for consistency (exact match, so score is 1.0)
+                        customer_match_result = (customer, 1.0, [(customer, 1.0)])
                     else:
-                        # Multiple results but none match well - flag for creation
-                        needs_customer_creation = True
+                        # Use fuzzy matching on API results for name search
+                        customer_match_result = fuzzy_match_customer(customer_name, customers, threshold=0.85)
+                        if customer_match_result[0]:
+                            customer = customer_match_result[0]
+                        elif len(customers) == 1:
+                            # Single result, use it even if below threshold
+                            customer = customers[0]
+                        else:
+                            # Multiple results but none match well - flag for creation
+                            needs_customer_creation = True
                 else:
                     # No customers found - will need to create
                     needs_customer_creation = True
@@ -803,6 +847,17 @@ class SalesOrderValidator:
                     self.customer_lookup[customer_name_clean] = customer
                     self.customer_lookup[customer_name_clean.upper()] = customer
                     self.customer_lookup[customer_name_clean.lower()] = customer
+                
+                # Build lookup by AdditionalAttribute1 (case-insensitive, strip whitespace)
+                additional_attr1 = customer.get('AdditionalAttribute1')
+                if additional_attr1:
+                    attr1_clean = str(additional_attr1).strip() if additional_attr1 else None
+                    if attr1_clean:
+                        # Store with prefix to distinguish from name lookups
+                        attr1_key = f"_attr1:{attr1_clean}"
+                        self.customer_lookup[attr1_key] = customer
+                        self.customer_lookup[f"_attr1:{attr1_clean.upper()}"] = customer
+                        self.customer_lookup[f"_attr1:{attr1_clean.lower()}"] = customer
             
             self.customers_loaded = True
         except Exception as e:
