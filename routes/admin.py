@@ -1,7 +1,7 @@
 """Admin/user provisioning routes"""
 from flask import Blueprint, jsonify, request, current_app as app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from database import db, UserClient, Cin7ApiLog, ClientCsvMapping
+from database import db, UserClient, Cin7ApiLog, ClientCsvMapping, DeploymentConfig
 from routes.auth import User  # Import User model from auth
 import uuid
 from datetime import datetime
@@ -705,3 +705,101 @@ def get_workflow():
     }
     
     return jsonify(workflow)
+
+
+@admin_bp.route('/deployment/config', methods=['GET'])
+@jwt_required()
+def get_deployment_config():
+    """Get deployment configuration (admin only)"""
+    user_id = get_user_id()
+    if not user_id:
+        return jsonify({'error': 'Invalid user ID format'}), 400
+    
+    if not is_global_admin(user_id):
+        return jsonify({'error': 'Access denied. Admin role required.'}), 403
+    
+    try:
+        # Get the most recent deployment config (only one should exist)
+        config = DeploymentConfig.query.order_by(DeploymentConfig.updated_at.desc()).first()
+        
+        if not config:
+            return jsonify({
+                'service_name': 'cin7-uploader',
+                'region': 'us-central1',
+                'environment_variables': {}
+            }), 200
+        
+        return jsonify({
+            'id': str(config.id),
+            'service_name': config.service_name,
+            'region': config.region,
+            'environment_variables': config.environment_variables or {},
+            'created_at': config.created_at.isoformat() if config.created_at else None,
+            'updated_at': config.updated_at.isoformat() if config.updated_at else None,
+            'created_by': str(config.created_by) if config.created_by else None
+        }), 200
+    except Exception as e:
+        import traceback
+        print(f"Error in get_deployment_config: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@admin_bp.route('/deployment/config', methods=['POST', 'PUT'])
+@jwt_required()
+def save_deployment_config():
+    """Save deployment configuration (admin only)"""
+    user_id = get_user_id()
+    if not user_id:
+        return jsonify({'error': 'Invalid user ID format'}), 400
+    
+    if not is_global_admin(user_id):
+        return jsonify({'error': 'Access denied. Admin role required.'}), 403
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        service_name = data.get('service_name', 'cin7-uploader')
+        region = data.get('region', 'us-central1')
+        env_vars = data.get('environment_variables', {})
+        
+        if not isinstance(env_vars, dict):
+            return jsonify({'error': 'environment_variables must be a dictionary'}), 400
+        
+        # Get existing config or create new one
+        config = DeploymentConfig.query.order_by(DeploymentConfig.updated_at.desc()).first()
+        
+        if config:
+            # Update existing
+            config.service_name = service_name
+            config.region = region
+            config.environment_variables = env_vars
+            config.updated_at = datetime.utcnow()
+            config.created_by = user_id
+        else:
+            # Create new
+            config = DeploymentConfig(
+                service_name=service_name,
+                region=region,
+                environment_variables=env_vars,
+                created_by=user_id
+            )
+            db.session.add(config)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'id': str(config.id),
+            'service_name': config.service_name,
+            'region': config.region,
+            'environment_variables': config.environment_variables,
+            'message': 'Deployment configuration saved successfully'
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        print(f"Error in save_deployment_config: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500

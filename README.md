@@ -11,6 +11,8 @@ A web application for uploading CSV files and creating sales orders in Cin7.
 - User authentication and authorization
 - Client management
 - Mapping templates
+- **Email webhook automation** - Receive emails with CSV attachments via Missive webhooks
+- **Order-level queue view** - Track individual order processing results (successful and failed)
 
 ## Tech Stack
 
@@ -117,6 +119,42 @@ npm run build
 ```
 
 The Flask app will serve the built frontend files from the `frontend/build` directory.
+
+### Google Cloud Run Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions.
+
+Quick deploy:
+```bash
+./deploy.sh
+```
+
+Or manually:
+```bash
+# Build and push
+docker build -t gcr.io/YOUR_PROJECT_ID/cin7-uploader .
+docker push gcr.io/YOUR_PROJECT_ID/cin7-uploader
+
+# Deploy
+gcloud run deploy cin7-uploader \
+  --image gcr.io/YOUR_PROJECT_ID/cin7-uploader \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated
+```
+
+### Email Webhook Configuration
+
+After deployment, configure Missive to send webhooks to:
+```
+https://your-service-url.run.app/api/webhooks/email
+```
+
+The webhook will:
+- Extract client name from email subject (e.g., "Chida Chida" from "Scheduled Report -> Chida Chida Daily Sales Orders")
+- Download CSV attachment
+- Process orders individually to Cin7
+- Track results in the Queue view (`/queue`)
 
 ## License
 

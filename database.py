@@ -131,8 +131,8 @@ class SalesOrderUpload(db.Model):
     __table_args__ = {'schema': 'cin7_uploader'}
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=False, index=True)
-    client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)  # Nullable for webhook uploads
+    client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=True, index=True)  # Nullable for standalone connections
     filename = Column(String(500), nullable=False)
     total_rows = Column(Integer, nullable=False)
     successful_orders = Column(Integer, default=0, nullable=False)
@@ -144,6 +144,42 @@ class SalesOrderUpload(db.Model):
     
     # Relationships
     client = relationship('Client', back_populates='uploads')
+    order_results = relationship('SalesOrderResult', back_populates='upload', cascade='all, delete-orphan')
+
+
+class SalesOrderResult(db.Model):
+    """Individual order processing results linked to SalesOrderUpload"""
+    __tablename__ = 'sales_order_result'
+    __table_args__ = {'schema': 'cin7_uploader'}
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    upload_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_upload.id'), nullable=False, index=True)
+    order_key = Column(String(255), nullable=False)  # Order identifier (Invoice #, Order #, or ROW_#)
+    row_numbers = Column(JSON, nullable=True)  # Array of CSV row numbers in this order
+    status = Column(String(50), nullable=False)  # 'success', 'failed', 'processing'
+    sale_id = Column(UUID(as_uuid=True), nullable=True)  # Cin7 Sale ID if created
+    sale_order_id = Column(UUID(as_uuid=True), nullable=True)  # Cin7 Sale Order ID if created
+    error_message = Column(Text, nullable=True)  # Error details if failed
+    order_data = Column(JSON, nullable=True)  # Snapshot of order data (customer, PO, etc.)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    processed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    upload = relationship('SalesOrderUpload', back_populates='order_results')
+
+
+class DeploymentConfig(db.Model):
+    """Deployment configuration - stores Cloud Run environment variables"""
+    __tablename__ = 'deployment_config'
+    __table_args__ = {'schema': 'cin7_uploader'}
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_name = Column(String(255), nullable=False, default='cin7-uploader')
+    region = Column(String(100), nullable=False, default='us-central1')
+    environment_variables = Column(JSON, nullable=False)  # Key-value pairs of env vars
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)
 
 
 class Cin7ApiLog(db.Model):

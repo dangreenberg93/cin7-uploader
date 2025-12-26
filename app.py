@@ -49,6 +49,7 @@ def create_app(config_name=None):
     from routes.settings import settings_bp
     from routes.sales import sales_bp
     from routes.admin import admin_bp
+    from routes.webhooks import webhooks_bp
     
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     
@@ -58,6 +59,7 @@ def create_app(config_name=None):
     app.register_blueprint(settings_bp, url_prefix='/api/settings')
     app.register_blueprint(sales_bp, url_prefix='/api/sales')
     app.register_blueprint(admin_bp, url_prefix='/api/admin')
+    app.register_blueprint(webhooks_bp, url_prefix='/api/webhooks')
     
     # Error handler to ensure CORS headers are included in error responses
     @app.errorhandler(500)

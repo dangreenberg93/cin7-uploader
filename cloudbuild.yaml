@@ -1,0 +1,40 @@
+# Cloud Build configuration for automated deployments
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/cin7-uploader:$COMMIT_SHA', '-t', 'gcr.io/$PROJECT_ID/cin7-uploader:latest', '.']
+  
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/cin7-uploader:$COMMIT_SHA']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/cin7-uploader:latest']
+  
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'cin7-uploader'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/cin7-uploader:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'FLASK_ENV=production'
+
+images:
+  - 'gcr.io/$PROJECT_ID/cin7-uploader:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/cin7-uploader:latest'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: '1200s'
+

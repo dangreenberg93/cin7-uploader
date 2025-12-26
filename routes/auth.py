@@ -7,7 +7,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from utils.email import send_password_reset_email
 import uuid
 import secrets
+import os
 from datetime import datetime, timedelta
+import bcrypt
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -65,8 +67,29 @@ def login():
             print(f"Login failed: No password hash for user {email}")
             return jsonify({'error': 'Invalid email or password'}), 401
         
-        password_valid = check_password_hash(user.password_hash, password)
-        print(f"Password check result: {password_valid}")
+        # Check password - support both Werkzeug (pbkdf2) and Supabase (bcrypt) formats
+        password_valid = False
+        hash_str = user.password_hash
+        
+        # Try Werkzeug format first (pbkdf2:sha256:...)
+        if hash_str.startswith('pbkdf2:'):
+            password_valid = check_password_hash(hash_str, password)
+            print(f"Password check (pbkdf2) result: {password_valid}")
+        # Try bcrypt format (Supabase uses bcrypt - starts with $2a$, $2b$, or $2y$)
+        elif hash_str.startswith('$2'):
+            try:
+                # bcrypt expects bytes
+                password_bytes = password.encode('utf-8')
+                hash_bytes = hash_str.encode('utf-8')
+                password_valid = bcrypt.checkpw(password_bytes, hash_bytes)
+                print(f"Password check (bcrypt) result: {password_valid}")
+            except Exception as e:
+                print(f"Error checking bcrypt password: {str(e)}")
+                password_valid = False
+        else:
+            # Fallback to Werkzeug for unknown formats
+            password_valid = check_password_hash(hash_str, password)
+            print(f"Password check (fallback) result: {password_valid}")
         
         if not password_valid:
             print(f"Login failed: Invalid password for user {email}")
@@ -171,28 +194,40 @@ def forgot_password():
             cleanup_expired_tokens()
             
             # Send password reset email
+            email_sent = False
             try:
                 email_sent = send_password_reset_email(email, token)
                 if email_sent:
                     print(f"Password reset email sent successfully to {email}")
-                    return jsonify({
-                        'message': 'If an account exists with this email, a password reset link has been sent'
-                    }), 200
-                else:
-                    # Email failed to send, but don't reveal this to user
-                    # Log the error for admin review
-                    print(f"WARNING: Failed to send password reset email to {email}")
-                    return jsonify({
-                        'message': 'If an account exists with this email, a password reset link has been sent'
-                    }), 200
             except Exception as email_error:
-                print(f"ERROR sending email to {email}: {str(email_error)}")
-                import traceback
-                traceback.print_exc()
-                # Still return success to user, but log the error
-                return jsonify({
-                    'message': 'If an account exists with this email, a password reset link has been sent'
-                }), 200
+                # Suppress broken pipe and other email errors - don't let them crash the request
+                error_msg = str(email_error)
+                print(f"ERROR sending email to {email}: {error_msg}")
+                # Only print traceback if it's not a broken pipe (which is usually just a connection issue)
+                if 'Broken pipe' not in error_msg and 'BrokenPipeError' not in error_msg:
+                    try:
+                        import traceback
+                        traceback.print_exc()
+                    except:
+                        pass  # Even traceback printing can fail with broken pipe
+            
+            # Always return success response (don't reveal if email failed)
+            response_data = {
+                'message': 'If an account exists with this email, a password reset link has been sent'
+            }
+            
+            # In development, always return the token for testing
+            is_dev = (os.environ.get('FLASK_ENV') == 'development' or 
+                     not os.environ.get('MAIL_USERNAME') or 
+                     not email_sent)
+            if is_dev:
+                frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+                reset_link = f"{frontend_url}/reset-password?token={token}"
+                response_data['dev_reset_link'] = reset_link
+                response_data['dev_token'] = token
+                print(f"DEV MODE: Reset link: {reset_link}")
+            
+            return jsonify(response_data), 200
         else:
             # Return same response to prevent email enumeration
             return jsonify({

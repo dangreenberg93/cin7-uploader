@@ -170,9 +170,16 @@ This link will expire in 1 hour. If you didn't request this, please ignore this 
         return True
         
     except Exception as e:
-        print(f"Error sending password reset email to {email}: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        error_msg = str(e)
+        print(f"Error sending password reset email to {email}: {error_msg}")
+        # Don't print full traceback if it's a broken pipe (common SMTP issue)
+        # This prevents cascading broken pipe errors
+        if 'Broken pipe' not in error_msg and 'BrokenPipeError' not in error_msg:
+            try:
+                import traceback
+                traceback.print_exc()
+            except:
+                pass  # Even traceback printing can fail
         return False
 
 

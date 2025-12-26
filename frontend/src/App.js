@@ -8,6 +8,7 @@ import SalesOrderUploader from './components/SalesOrderUploader';
 import Admin from './components/Admin';
 import CsvMappingConfig from './components/CsvMappingConfig';
 import Cin7Settings from './components/Cin7Settings';
+import QueueView from './components/QueueView';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
 import { AppSidebar } from './components/AppSidebar';
 import { ClientProvider, useClient } from './contexts/ClientContext';
@@ -325,6 +326,7 @@ function AppContent() {
                   <main className="flex flex-1 flex-col overflow-hidden bg-white rounded-b-md min-h-0 min-w-0">
                     <Routes>
                       <Route path="/" element={<SalesOrderUploader user={user} />} />
+                      <Route path="/queue" element={<QueueView />} />
                       <Route path="/mappings" element={<CsvMappingConfig />} />
                       <Route path="/settings/cin7" element={<Cin7Settings />} />
                       {isAdmin ? (

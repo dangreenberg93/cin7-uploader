@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, ChevronsUpDown, Shield, FileText, Cog, ShoppingCart } from 'lucide-react';
+import { LogOut, ChevronsUpDown, Shield, FileText, Cog, ShoppingCart, List } from 'lucide-react';
 import { useClient } from '../contexts/ClientContext';
 import {
   Sidebar,
@@ -132,6 +132,14 @@ export function AppSidebar({ user, onLogout }) {
                   <a href="#" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
                     <ShoppingCart />
                     <span>Sales Orders</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild isActive={location.pathname === '/queue'}>
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/queue'); }}>
+                    <List />
+                    <span>Queue</span>
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>
