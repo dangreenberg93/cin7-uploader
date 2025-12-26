@@ -614,7 +614,7 @@ def get_workflow():
             {
                 'step': 4,
                 'name': 'Create Sale Order',
-                'description': 'POST /saleorder - Creates the sale order with line items'
+                'description': 'POST /sale/order - Creates the sale order with line items'
             }
         ],
         'api_calls': [
@@ -650,7 +650,7 @@ def get_workflow():
                 }
             },
             {
-                'endpoint': '/saleorder',
+                'endpoint': '/sale/order',
                 'method': 'POST',
                 'base_url': 'https://inventory.dearsystems.com/ExternalApi/v2/',
                 'description': 'Creates a Sale Order with line items',

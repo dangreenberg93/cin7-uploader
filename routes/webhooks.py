@@ -299,7 +299,8 @@ def process_single_order(
     settings: Dict,
     api_client: Cin7SalesAPI,
     builder: SalesOrderBuilder,
-    credential_id_for_logging: uuid.UUID
+    credential_id_for_logging: uuid.UUID,
+    existing_order_result: Optional[SalesOrderResult] = None
 ) -> Dict:
     """
     Process a single order (create Sale and Sale Order in Cin7).
@@ -314,20 +315,26 @@ def process_single_order(
         api_client: Cin7SalesAPI instance
         builder: SalesOrderBuilder instance
         credential_id_for_logging: Credential ID for API logging
+        existing_order_result: Optional existing SalesOrderResult to update (for retries)
         
     Returns:
         Result dict with status, sale_id, sale_order_id, error_message, order_data
     """
-    # Create order result record with status='processing'
-    order_result = SalesOrderResult(
-        id=uuid.uuid4(),
-        upload_id=upload_id,
-        order_key=order_key,
-        row_numbers=row_numbers,
-        status='processing',
-        created_at=datetime.utcnow()
-    )
-    db.session.add(order_result)
+    # Use existing order_result if provided (for retries), otherwise create new one
+    if existing_order_result:
+        order_result = existing_order_result
+        order_result.status = 'processing'
+    else:
+        # Create order result record with status='processing'
+        order_result = SalesOrderResult(
+            id=uuid.uuid4(),
+            upload_id=upload_id,
+            order_key=order_key,
+            row_numbers=row_numbers,
+            status='processing',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order_result)
     db.session.commit()
     
     # Extract order data snapshot - include all mapped columns from all rows
@@ -574,6 +581,7 @@ def process_single_order(
         
         # Step 2: Build and create Sale Order
         # Note: sale_order_data was already built above for "what_is_needed", but rebuild with actual sale_id
+        logger.info(f"Step 2: Building Sale Order for order {order_key} with sale_id {sale_id}")
         if len(order_rows) > 1:
             # Multiple rows - use grouped rows
             row_data_list = order_rows
@@ -582,19 +590,41 @@ def process_single_order(
             # Single row order
             sale_order_data = builder.build_sale_order(primary_row, column_mapping, str(sale_id))
         
+        logger.info(f"Sale Order payload built for order {order_key}: SaleID={sale_order_data.get('SaleID')}, Lines count={len(sale_order_data.get('Lines', []))}, Total={sale_order_data.get('Total')}")
+        
         # Create Sale Order via API
+        logger.info(f"Creating Sale Order via API for order {order_key}...")
         so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
+        logger.info(f"Sale Order API call result for order {order_key}: success={so_success}, message={so_message}")
+        logger.info(f"Sale Order response type: {type(so_response)}, response: {so_response}")
         
         if so_success:
             sale_order_id = None
             if isinstance(so_response, dict):
-                sale_order_id = so_response.get('ID')
+                # Try multiple possible ID fields
+                sale_order_id = (so_response.get('ID') or 
+                               so_response.get('SaleOrderID') or 
+                               so_response.get('SaleOrder') or
+                               so_response.get('id'))
+                logger.info(f"Extracted sale_order_id from dict: {sale_order_id}, response keys: {list(so_response.keys()) if isinstance(so_response, dict) else 'N/A'}")
             elif isinstance(so_response, list) and len(so_response) > 0:
-                sale_order_id = so_response[0].get('ID') if isinstance(so_response[0], dict) else None
+                first_item = so_response[0]
+                if isinstance(first_item, dict):
+                    sale_order_id = (first_item.get('ID') or 
+                                   first_item.get('SaleOrderID') or 
+                                   first_item.get('SaleOrder') or
+                                   first_item.get('id'))
+                logger.info(f"Extracted sale_order_id from list: {sale_order_id}")
+            
+            # If we still don't have an ID, log warning but don't fail - Sale Order might have been created
+            if not sale_order_id:
+                logger.warning(f"Sale Order created successfully but no ID found in response for order {order_key}. Response: {so_response}")
+                # Still mark as success since the API call succeeded - the Sale Order was likely created
+                # The ID might be in the response but in an unexpected format
             
             order_result.status = 'success'
             order_result.sale_id = sale_id
-            order_result.sale_order_id = sale_order_id
+            order_result.sale_order_id = sale_order_id if sale_order_id else None
             # Store sale_payload for successful orders too (for reference)
             order_result.order_data = {
                 **order_data,
@@ -1217,8 +1247,7 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
         select_fields = [
             'cec.id',
             'cec.cin7_api_auth_accountid as account_id',
-            'cec.cin7_api_auth_applicationkey as application_key',
-            'cec.cin7_api_auth_applicationsecret as application_secret'
+            'cec.cin7_api_auth_applicationkey as application_key'
         ]
         
         if 'customer_account_receivable' in existing_customer_cols:
@@ -1254,9 +1283,8 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
         
         # Initialize API client and builder
         api_client = Cin7SalesAPI(
-            account_id=cred_row.account_id,
+            account_id=str(cred_row.account_id),
             application_key=str(cred_row.application_key),
-            application_secret=cred_row.application_secret,
             base_url='https://inventory.dearsystems.com/ExternalApi/v2/',
             logger_callback=lambda **kwargs: None  # Disable logging for retry
         )
@@ -1281,7 +1309,12 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
         row_data_list = [r['data'] for r in order_rows]
         row_numbers = [r['row_number'] for r in order_rows]
         
-        # Process the order
+        # Update retry tracking before processing
+        order_result.retry_count = (order_result.retry_count or 0) + 1
+        order_result.last_retry_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Process the order (pass existing order_result so it gets updated in place)
         result = process_single_order(
             upload_id=order_result.upload_id,
             order_key=order_result.order_key,
@@ -1291,37 +1324,21 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
             settings=settings,
             api_client=api_client,
             builder=builder,
-            credential_id_for_logging=client_erp_credentials_id
+            credential_id_for_logging=client_erp_credentials_id,
+            existing_order_result=order_result  # Pass existing record so it gets updated
         )
         
-        # Update retry tracking
-        order_result.retry_count = (order_result.retry_count or 0) + 1
-        order_result.last_retry_at = datetime.utcnow()
-        
-        # Update the existing order_result
-        order_result.status = result['status']
-        if result['status'] == 'success':
-            order_result.sale_id = uuid.UUID(result.get('sale_id')) if result.get('sale_id') else None
-            order_result.sale_order_id = uuid.UUID(result.get('sale_order_id')) if result.get('sale_order_id') else None
-            order_result.error_message = None
-            order_result.error_type = None
-            # Clear manual resolution if it was resolved (since it's now actually successful)
-            if order_result.resolved_at:
-                order_result.resolved_at = None
-                order_result.resolved_by = None
-        else:
-            order_result.error_message = result.get('error_message', '')
-            order_result.error_type = categorize_error(result.get('error_message', ''))
-            order_result.order_data = result.get('order_data', {})
-        
-        order_result.processed_at = datetime.utcnow()
-        db.session.commit()
+        # Clear manual resolution if it was resolved (since it's now actually successful)
+        if result['status'] == 'success' and order_result.resolved_at:
+            order_result.resolved_at = None
+            order_result.resolved_by = None
+            db.session.commit()
         
         return {
             'status': result['status'],
-            'sale_id': str(order_result.sale_id) if order_result.sale_id else None,
-            'sale_order_id': str(order_result.sale_order_id) if order_result.sale_order_id else None,
-            'error_message': order_result.error_message
+            'sale_id': result.get('sale_id'),
+            'sale_order_id': result.get('sale_order_id'),
+            'error_message': result.get('error_message')
         }, None
     
     except Exception as e:

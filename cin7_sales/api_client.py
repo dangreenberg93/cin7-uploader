@@ -58,13 +58,36 @@ class Cin7SalesAPI:
         duration_ms = int((time.time() - start_time) * 1000)
         response_body = None
         error_message = None
+        is_json_response = False
         
+        # Try to parse as JSON first
         try:
-            response_body = response.json() if response.content else None
+            if response.content:
+                response_body = response.json()
+                is_json_response = True
         except:
+            # Not JSON - could be HTML error page or plain text
             response_body = response.text[:1000] if response.text else None
+            is_json_response = False
+        
+        # Check if we got HTML instead of JSON (common when API returns error pages with 200 status)
+        if response_body and isinstance(response_body, str) and ('<!DOCTYPE html>' in response_body or '<html' in response_body.lower()):
+            # Got HTML error page - treat as error even if status is 200
+            error_message = "API returned HTML error page instead of JSON response"
+            if response.status_code == 200:
+                # Extract error message from HTML if possible
+                if 'Page not found' in response_body:
+                    error_message = "API endpoint not found (Page not found)"
+                elif 'Error' in response_body or 'error' in response_body.lower():
+                    error_message = "API returned error page"
+            return (False, error_message, None)
         
         if response.status_code == 200:
+            # Status is 200, but make sure we have valid JSON
+            if not is_json_response and response_body:
+                # Got 200 but response wasn't JSON - treat as error
+                error_message = f"Expected JSON response but got: {str(response_body)[:200]}"
+                return (False, error_message, None)
             success = True
             message = "Success"
             result = response_body
@@ -226,8 +249,8 @@ class Cin7SalesAPI:
             (success, message, response_data)
         """
         self._rate_limit()
-        url = f"{self.base_url}/saleorder"
-        endpoint = "/saleorder"
+        url = f"{self.base_url}/sale/order"
+        endpoint = "/sale/order"
         method = "POST"
         start_time = time.time()
         
