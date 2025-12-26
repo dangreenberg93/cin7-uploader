@@ -133,12 +133,14 @@ class SalesOrderUpload(db.Model):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)  # Nullable for webhook uploads
     client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=True, index=True)  # Nullable for standalone connections
+    client_erp_credentials_id = Column(UUID(as_uuid=True), ForeignKey('voyager.client_erp_credentials.id'), nullable=True, index=True)  # Store credentials ID for retry
     filename = Column(String(500), nullable=False)
     total_rows = Column(Integer, nullable=False)
     successful_orders = Column(Integer, default=0, nullable=False)
     failed_orders = Column(Integer, default=0, nullable=False)
     status = Column(String(50), nullable=False)  # 'pending', 'processing', 'completed', 'failed'
     error_log = Column(JSON, nullable=True)  # Array of errors
+    csv_content = Column(Text, nullable=True)  # Store CSV content for preview (base64 encoded)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     completed_at = Column(DateTime, nullable=True)
     
@@ -163,6 +165,13 @@ class SalesOrderResult(db.Model):
     order_data = Column(JSON, nullable=True)  # Snapshot of order data (customer, PO, etc.)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     processed_at = Column(DateTime, nullable=True)
+    
+    # Task tracking fields
+    retry_count = Column(Integer, default=0, nullable=False)  # Number of retry attempts
+    last_retry_at = Column(DateTime, nullable=True)  # Timestamp of last retry
+    resolved_at = Column(DateTime, nullable=True)  # Timestamp when manually resolved
+    resolved_by = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True)  # User who resolved it
+    error_type = Column(String(50), nullable=True)  # Categorized error type (e.g., "customer_not_found", "missing_fields", "api_error")
     
     # Relationships
     upload = relationship('SalesOrderUpload', back_populates='order_results')

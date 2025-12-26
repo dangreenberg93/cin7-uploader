@@ -6,3 +6,4 @@ export function clearSupabaseClient() {
   // This is a placeholder function
 }
 
+

@@ -4,7 +4,7 @@ import { cn } from "../../lib/utils"
 const Table = React.forwardRef(({ className, ...props }, ref) => (
   <table
     ref={ref}
-    className={cn("w-full caption-bottom text-sm border-collapse border", className)}
+    className={cn("w-full caption-bottom text-sm border-collapse border-[0.5px]", className)}
     {...props}
   />
 ))

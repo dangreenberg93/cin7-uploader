@@ -446,39 +446,81 @@ class SalesOrderValidator:
         for row in rows:
             order_key = None
             
-            # Try Invoice # first - handle both exact match and case-insensitive match
+            # Skip rows that are clearly incomplete (no key identifying fields)
+            # Check if row has Order #, Invoice #, or Customer Name
+            has_order_id = False
+            has_customer = False
+            
+            # Check for Order # or Invoice #
             if invoice_col:
-                invoice_val = None
-                # Try exact match first
-                if invoice_col in row['data']:
-                    invoice_val = row['data'][invoice_col]
-                else:
-                    # Try case-insensitive match
-                    for key, val in row['data'].items():
-                        if key.lower() == invoice_col.lower():
-                            invoice_val = val
-                            break
-                
+                invoice_val = row['data'].get(invoice_col) or next((v for k, v in row['data'].items() if k.lower() == invoice_col.lower()), None)
                 if invoice_val and str(invoice_val).strip():
-                    order_key = f"INV_{str(invoice_val).strip()}"
+                    order_key = str(invoice_val).strip()
+                    has_order_id = True
             
-            # Fallback to Sales Order # - handle both exact match and case-insensitive match
             if not order_key and sale_order_col:
-                so_val = None
-                if sale_order_col in row['data']:
-                    so_val = row['data'][sale_order_col]
-                else:
-                    # Try case-insensitive match
-                    for key, val in row['data'].items():
-                        if key.lower() == sale_order_col.lower():
-                            so_val = val
-                            break
+                so_val = row['data'].get(sale_order_col) or next((v for k, v in row['data'].items() if k.lower() == sale_order_col.lower()), None)
                 if so_val and str(so_val).strip():
-                    order_key = f"SO_{str(so_val).strip()}"
+                    order_key = str(so_val).strip()
+                    has_order_id = True
             
-            # If no grouping key found, treat each row as its own order
+            # Check for customer name
+            customer_col = column_mapping.get('CustomerName') or column_mapping.get('Customer')
+            if customer_col:
+                customer_val = row['data'].get(customer_col) or next((v for k, v in row['data'].items() if k.lower() == customer_col.lower()), None)
+                if customer_val and str(customer_val).strip():
+                    has_customer = True
+            
+            # Skip rows that don't have an order identifier AND don't have a customer
+            # These are continuation rows that should be merged with previous row
+            if not has_order_id and not has_customer:
+                # This is likely a continuation row - try to merge with previous order
+                # Find the most recent order that was added
+                if groups:
+                    # Get the last order key that was added (most recent)
+                    last_order_key = list(groups.keys())[-1]
+                    # Only merge if it's from a real order (not a ROW_ order)
+                    # Check if it's not a ROW_ order (ROW_ orders are fallback row numbers)
+                    if not last_order_key.startswith('ROW_'):
+                        # Check if this row has item data (SKU, quantity) - if so, it's a continuation
+                        sku_col = column_mapping.get('SKU') or column_mapping.get('ProductCode')
+                        has_item = False
+                        if sku_col:
+                            sku_val = row['data'].get(sku_col) or next((v for k, v in row['data'].items() if k.lower() == sku_col.lower()), None)
+                            if sku_val and str(sku_val).strip():
+                                has_item = True
+                        
+                        # If row has quantity or item data, merge with previous order
+                        qty_col = column_mapping.get('Quantity') or column_mapping.get('QuantityOrdered')
+                        has_quantity = False
+                        if qty_col:
+                            qty_val = row['data'].get(qty_col) or next((v for k, v in row['data'].items() if k.lower() == qty_col.lower()), None)
+                            if qty_val and str(qty_val).strip():
+                                has_quantity = True
+                        
+                        # Also check for price/extended price fields
+                        price_col = column_mapping.get('Price') or column_mapping.get('ExtendedPrice')
+                        has_price = False
+                        if price_col:
+                            price_val = row['data'].get(price_col) or next((v for k, v in row['data'].items() if k.lower() == price_col.lower()), None)
+                            if price_val and str(price_val).strip():
+                                has_price = True
+                        
+                        # If row has item, quantity, or price data, it's a continuation - merge with previous order
+                        if has_item or has_quantity or has_price:
+                            groups[last_order_key].append(row)
+                            continue
+                
+                # If no previous order to merge with, skip this incomplete row entirely
+                continue
+            
+            # If no grouping key found and row has customer/order data, treat as separate order
             if not order_key:
-                order_key = f"ROW_{row['row_number']}"
+                if has_customer or has_order_id:
+                    order_key = f"ROW_{row['row_number']}"
+                else:
+                    # Skip completely empty/incomplete rows
+                    continue
             
             if order_key not in groups:
                 groups[order_key] = []

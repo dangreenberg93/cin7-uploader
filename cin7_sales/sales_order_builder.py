@@ -215,6 +215,20 @@ class SalesOrderBuilder:
         if 'CustomerReference' in mapped and mapped['CustomerReference']:
             sale['CustomerReference'] = mapped['CustomerReference']
         
+        # SaleDate (Order Date)
+        if 'SaleDate' in mapped and mapped['SaleDate']:
+            from cin7_sales.csv_parser import CSVParser
+            parser = CSVParser()
+            parsed_date = parser._parse_date(mapped['SaleDate'], None)
+            if parsed_date:
+                sale['SaleDate'] = parsed_date
+            else:
+                sale['SaleDate'] = mapped['SaleDate']
+        
+        # AdditionalAttribute1
+        if 'AdditionalAttribute1' in mapped and mapped['AdditionalAttribute1']:
+            sale['AdditionalAttribute1'] = str(mapped['AdditionalAttribute1']).strip()
+        
         return sale
     
     def build_sale_order_from_rows(self, rows: List[Dict[str, Any]], column_mapping: Dict[str, str], sale_id: str) -> Dict[str, Any]:
@@ -496,6 +510,8 @@ class SalesOrderBuilder:
                                     price_str = str(row_data[price_col]).replace('$', '').replace(',', '').strip()
                                     if price_str:  # Only use if not empty
                                         price_value = float(price_str)
+                                    elif price_str == '0' or price_str == '0.0':  # Explicitly allow 0
+                                        price_value = 0.0
                                 except (ValueError, TypeError):
                                     pass
                         
@@ -519,8 +535,12 @@ class SalesOrderBuilder:
                             if total_value and total_value > 0:
                                 price_value = total_value / quantity
                         
-                        if price_value:
+                        # Set Price - can be 0, that's valid
+                        if price_value is not None:
                             line['Price'] = price_value
+                        else:
+                            # If no price found, default to 0
+                            line['Price'] = 0.0
                         
                         # Lookup product by SKU to get ProductID and Name
                         if sku:
@@ -528,7 +548,7 @@ class SalesOrderBuilder:
                             if product:
                                 product_id = product.get('ID')
                                 if product_id:
-                                    line['ProductID'] = product_id
+                                    line['ProductID'] = str(product_id)  # Ensure it's a string
                                 
                                 # Use product name from lookup
                                 product_name = product.get('Name')
@@ -550,7 +570,14 @@ class SalesOrderBuilder:
                         if tax_rule:
                             line['TaxRule'] = tax_rule
                         
-                        if line.get('SKU') and line.get('Price'):
+                        # Add line if SKU is present (Price can be 0 or missing, we'll still show the line)
+                        if line.get('SKU'):
+                            # If Price is missing, set it to 0 so the line still appears
+                            if 'Price' not in line or not line.get('Price'):
+                                line['Price'] = 0.0
+                            # If Quantity is missing, set it to 0
+                            if 'Quantity' not in line or not line.get('Quantity'):
+                                line['Quantity'] = 0.0
                             lines.append(line)
         
         return lines

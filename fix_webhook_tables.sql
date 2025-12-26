@@ -34,3 +34,4 @@ CREATE INDEX IF NOT EXISTS ix_sales_order_result_upload_id
 CREATE INDEX IF NOT EXISTS ix_sales_order_result_created_at 
     ON cin7_uploader.sales_order_result(created_at);
 
+

@@ -50,3 +50,4 @@ EXPOSE 8080
 # Use gunicorn for production
 CMD exec gunicorn --bind :$PORT --workers 2 --threads 4 --timeout 300 --access-logfile - --error-logfile - wsgi:app
 
+

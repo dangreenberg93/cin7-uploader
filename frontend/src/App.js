@@ -39,6 +39,22 @@ axios.interceptors.request.use(
   }
 );
 
+// Handle 401 responses globally - redirect to login
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      // Clear invalid token
+      localStorage.removeItem('token');
+      // Redirect to login if not already there
+      if (window.location.pathname !== '/' && !window.location.pathname.includes('/login')) {
+        window.location.href = '/';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 function ActivityLogSidebar() {
   const { showActivityLog, setShowActivityLog, terminalLines } = useActivityLog();
   const location = useLocation();
@@ -323,7 +339,7 @@ function AppContent() {
               <div className="flex flex-1 min-w-0">
                 <SidebarInset className="bg-white m-2 rounded-md border border-gray-200 min-w-0 shadow-sm flex-1">
                   <AppHeaderContent />
-                  <main className="flex flex-1 flex-col overflow-hidden bg-white rounded-b-md min-h-0 min-w-0">
+                  <main className="flex flex-1 flex-col overflow-y-auto bg-white rounded-b-md min-h-0 min-w-0">
                     <Routes>
                       <Route path="/" element={<SalesOrderUploader user={user} />} />
                       <Route path="/queue" element={<QueueView />} />
