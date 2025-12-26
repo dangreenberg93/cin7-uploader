@@ -144,16 +144,47 @@ def normalize_webhook_payload(payload: Dict, request_obj) -> Optional[Dict]:
     if not payload:
         return None
     
-    # Missive format
-    if 'latest_message' in payload and 'subject' in payload:
-        subject = payload.get('subject', '')
+    # Missive format - try different possible structures
+    # Format 1: payload.subject and payload.latest_message.attachments
+    if 'latest_message' in payload:
         latest_message = payload.get('latest_message', {})
+        subject = latest_message.get('subject') or payload.get('subject', '')
         attachments = latest_message.get('attachments', [])
         
         # Find CSV attachment
         csv_attachment = None
         for att in attachments:
-            if att.get('extension', '').lower() == 'csv' or att.get('sub_type', '').lower() == 'csv':
+            # Check various ways CSV might be identified
+            ext = att.get('extension', '').lower() or att.get('file_extension', '').lower()
+            sub_type = att.get('sub_type', '').lower() or att.get('content_type', '').lower()
+            filename = att.get('filename', '').lower() or att.get('name', '').lower()
+            
+            if ext == 'csv' or sub_type == 'csv' or 'csv' in sub_type or filename.endswith('.csv'):
+                csv_attachment = att
+                break
+        
+        if csv_attachment and subject:
+            return {
+                'subject': subject,
+                'attachments': [{
+                    'url': csv_attachment.get('url') or csv_attachment.get('download_url') or csv_attachment.get('signed_url'),
+                    'filename': csv_attachment.get('filename') or csv_attachment.get('name', 'attachment.csv')
+                }]
+            }
+    
+    # Format 2: Direct subject and attachments at root level
+    if 'subject' in payload:
+        subject = payload.get('subject', '')
+        attachments = payload.get('attachments', [])
+        
+        # Find CSV attachment
+        csv_attachment = None
+        for att in attachments:
+            ext = att.get('extension', '').lower() or att.get('file_extension', '').lower()
+            sub_type = att.get('sub_type', '').lower() or att.get('content_type', '').lower()
+            filename = att.get('filename', '').lower() or att.get('name', '').lower()
+            
+            if ext == 'csv' or sub_type == 'csv' or 'csv' in sub_type or filename.endswith('.csv'):
                 csv_attachment = att
                 break
         
@@ -161,8 +192,8 @@ def normalize_webhook_payload(payload: Dict, request_obj) -> Optional[Dict]:
             return {
                 'subject': subject,
                 'attachments': [{
-                    'url': csv_attachment.get('url'),
-                    'filename': csv_attachment.get('filename', 'attachment.csv')
+                    'url': csv_attachment.get('url') or csv_attachment.get('download_url') or csv_attachment.get('signed_url'),
+                    'filename': csv_attachment.get('filename') or csv_attachment.get('name', 'attachment.csv')
                 }]
             }
     
@@ -694,10 +725,18 @@ def receive_email_webhook():
         # Normalize payload
         normalized = normalize_webhook_payload(payload, request)
         
+        if not normalized:
+            # Log the actual payload structure to help debug
+            logger.error(f"Failed to normalize webhook payload. Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}")
+            logger.error(f"Full payload structure: {str(payload)[:1000]}")
+            return jsonify({
+                'error': 'Unsupported webhook format or missing required fields',
+                'received_keys': list(payload.keys()) if isinstance(payload, dict) else 'not a dict',
+                'hint': 'Expected Missive format with "subject" and "latest_message.attachments"'
+            }), 400
+        
         # Log normalized payload
         logger.info(f"Normalized webhook payload - subject: {normalized.get('subject', 'N/A')}, attachments: {len(normalized.get('attachments', []))}")
-        if not normalized:
-            return jsonify({'error': 'Unsupported webhook format or missing required fields'}), 400
         
         # Extract subject and client name
         subject = normalized.get('subject', '')
