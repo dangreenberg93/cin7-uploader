@@ -69,6 +69,7 @@ const Admin = ({ user }) => {
   const [region, setRegion] = useState('us-central1');
   const [savingConfig, setSavingConfig] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(false);
+  const [applyingConfig, setApplyingConfig] = useState(false);
 
   useEffect(() => {
     if (selectedClientForEdit) {
@@ -432,6 +433,34 @@ const Admin = ({ user }) => {
       toast.error(errorMessage);
     } finally {
       setSavingConfig(false);
+    }
+  };
+
+  const applyDeploymentConfig = async () => {
+    setApplyingConfig(true);
+    try {
+      const response = await axios.post('/admin/deployment/apply');
+      toast.success('Environment variables applied to Cloud Run successfully!');
+    } catch (error) {
+      console.error('Error applying deployment config:', error);
+      const errorMessage = error.response?.data?.error || 'Failed to apply configuration to Cloud Run';
+      toast.error(errorMessage);
+    } finally {
+      setApplyingConfig(false);
+    }
+  };
+
+  const applyDeploymentConfig = async () => {
+    setApplyingConfig(true);
+    try {
+      const response = await axios.post('/admin/deployment/apply');
+      toast.success('Environment variables applied to Cloud Run successfully!');
+    } catch (error) {
+      console.error('Error applying deployment config:', error);
+      const errorMessage = error.response?.data?.error || 'Failed to apply configuration to Cloud Run';
+      toast.error(errorMessage);
+    } finally {
+      setApplyingConfig(false);
     }
   };
 
@@ -1296,11 +1325,12 @@ CORS_ORIGINS=https://yourdomain.com`}
                 </p>
               </div>
 
-              {/* Save Button */}
-              <div className="flex justify-end">
+              {/* Save and Apply Buttons */}
+              <div className="flex justify-end gap-2">
                 <Button
                   onClick={saveDeploymentConfig}
                   disabled={savingConfig || loadingConfig || !envFileContent.trim()}
+                  variant="outline"
                 >
                   {savingConfig ? (
                     <>
@@ -1310,7 +1340,23 @@ CORS_ORIGINS=https://yourdomain.com`}
                   ) : (
                     <>
                       <Save className="w-4 h-4 mr-2" />
-                      Save Configuration
+                      Save to Database
+                    </>
+                  )}
+                </Button>
+                <Button
+                  onClick={applyDeploymentConfig}
+                  disabled={applyingConfig || loadingConfig}
+                >
+                  {applyingConfig ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                      Applying...
+                    </>
+                  ) : (
+                    <>
+                      <Cloud className="w-4 h-4 mr-2" />
+                      Apply to Cloud Run
                     </>
                   )}
                 </Button>

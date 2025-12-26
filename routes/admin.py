@@ -803,3 +803,160 @@ def save_deployment_config():
         print(f"Error in save_deployment_config: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+@admin_bp.route('/deployment/apply', methods=['POST'])
+@jwt_required()
+def apply_deployment_config():
+    """Apply saved deployment configuration to Cloud Run (admin only)"""
+    user_id = get_user_id()
+    if not user_id:
+        return jsonify({'error': 'Invalid user ID format'}), 400
+    
+    if not is_global_admin(user_id):
+        return jsonify({'error': 'Access denied. Admin role required.'}), 403
+    
+    try:
+        # Get saved config from database
+        config = DeploymentConfig.query.order_by(DeploymentConfig.updated_at.desc()).first()
+        
+        if not config:
+            return jsonify({'error': 'No deployment configuration found. Please save configuration first.'}), 404
+        
+        if not config.environment_variables:
+            return jsonify({'error': 'No environment variables to apply'}), 400
+        
+        # Get project ID from environment or use default
+        import os
+        project_id = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
+        
+        if not project_id:
+            # Try to get from metadata service (if running on Cloud Run)
+            try:
+                import requests
+                metadata_url = 'http://metadata.google.internal/computeMetadata/v1/project/project-id'
+                headers = {'Metadata-Flavor': 'Google'}
+                response = requests.get(metadata_url, headers=headers, timeout=2)
+                if response.status_code == 200:
+                    project_id = response.text
+            except:
+                pass
+        
+        if not project_id:
+            return jsonify({
+                'error': 'Could not determine Google Cloud Project ID. Set GOOGLE_CLOUD_PROJECT environment variable or ensure service account has proper permissions.'
+            }), 400
+        
+        # Use Google Cloud Run Admin API via REST API
+        try:
+            from google.auth import default
+            from google.auth.transport.requests import Request
+            import requests
+            import json
+            
+            # Get default credentials
+            credentials, _ = default()
+            
+            # Refresh credentials if needed
+            if not credentials.valid:
+                credentials.refresh(Request())
+            
+            # Get access token
+            access_token = credentials.token
+            
+            # Cloud Run API endpoint
+            service_name_path = f"projects/{project_id}/locations/{config.region}/services/{config.service_name}"
+            api_url = f"https://{config.region}-run.googleapis.com/v2/{service_name_path}"
+            
+            # Get current service configuration
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            get_response = requests.get(api_url, headers=headers, timeout=30)
+            
+            if get_response.status_code == 404:
+                return jsonify({
+                    'error': f'Could not find Cloud Run service: {config.service_name} in region {config.region}'
+                }), 404
+            
+            if get_response.status_code != 200:
+                return jsonify({
+                    'error': f'Failed to get service configuration: {get_response.text}'
+                }), get_response.status_code
+            
+            service_data = get_response.json()
+            
+            # Get existing environment variables
+            existing_env_vars = {}
+            if 'template' in service_data and 'containers' in service_data['template']:
+                containers = service_data['template']['containers']
+                if containers and len(containers) > 0:
+                    existing_env = containers[0].get('env', [])
+                    existing_env_vars = {env['name']: env.get('value', '') for env in existing_env}
+            
+            # Merge with new environment variables
+            existing_env_vars.update(config.environment_variables)
+            
+            # Prepare updated environment variables
+            updated_env_vars = [
+                {'name': k, 'value': str(v)}
+                for k, v in existing_env_vars.items()
+            ]
+            
+            # Update service template
+            if 'template' not in service_data:
+                service_data['template'] = {}
+            if 'containers' not in service_data['template']:
+                service_data['template']['containers'] = [{}]
+            
+            service_data['template']['containers'][0]['env'] = updated_env_vars
+            
+            # Update the service using PATCH
+            update_mask = 'template.containers[0].env'
+            patch_url = f"{api_url}?updateMask={update_mask}"
+            
+            patch_response = requests.patch(
+                patch_url,
+                headers=headers,
+                json=service_data,
+                timeout=60
+            )
+            
+            if patch_response.status_code not in [200, 201]:
+                return jsonify({
+                    'error': f'Failed to update Cloud Run service: {patch_response.text}',
+                    'status_code': patch_response.status_code
+                }), patch_response.status_code
+            
+            result = patch_response.json()
+            
+            return jsonify({
+                'message': 'Deployment configuration applied successfully',
+                'service_name': config.service_name,
+                'region': config.region,
+                'project_id': project_id,
+                'environment_variables_count': len(updated_env_vars),
+                'status': result.get('status', {}).get('conditions', [{}])[0].get('type', 'unknown') if 'status' in result else 'updated'
+            }), 200
+            
+        except ImportError as e:
+            return jsonify({
+                'error': f'Google Auth library not installed. Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2. Error: {str(e)}'
+            }), 500
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Error applying deployment config: {str(e)}")
+            print(error_details)
+            return jsonify({
+                'error': f'Failed to apply configuration to Cloud Run: {str(e)}',
+                'details': error_details if app.config.get('DEBUG') else None
+            }), 500
+            
+    except Exception as e:
+        import traceback
+        print(f"Error in apply_deployment_config: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
