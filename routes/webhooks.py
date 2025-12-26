@@ -685,11 +685,17 @@ def receive_email_webhook():
         else:
             payload = request.form.to_dict()
         
+        # Log incoming webhook payload (for debugging)
+        logger.info(f"Received webhook payload: {str(payload)[:500]}")  # Log first 500 chars to avoid huge logs
+        
         if not payload:
             return jsonify({'error': 'No payload received'}), 400
         
         # Normalize payload
         normalized = normalize_webhook_payload(payload, request)
+        
+        # Log normalized payload
+        logger.info(f"Normalized webhook payload - subject: {normalized.get('subject', 'N/A')}, attachments: {len(normalized.get('attachments', []))}")
         if not normalized:
             return jsonify({'error': 'Unsupported webhook format or missing required fields'}), 400
         
@@ -749,6 +755,8 @@ def receive_email_webhook():
             upload.completed_at = datetime.utcnow()
             db.session.commit()
             return jsonify(result), 400
+        
+        logger.info(f"Webhook processed successfully - upload_id: {upload.id}, client: {client_name}, orders: {result.get('total_orders', 0)}")
         
         return jsonify({
             'upload_id': str(upload.id),

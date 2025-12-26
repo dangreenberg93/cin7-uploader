@@ -450,21 +450,6 @@ const Admin = ({ user }) => {
     }
   };
 
-  const applyDeploymentConfig = async () => {
-    setApplyingConfig(true);
-    try {
-      const response = await axios.post('/admin/deployment/apply');
-      toast.success('Environment variables applied to Cloud Run successfully!');
-    } catch (error) {
-      console.error('Error applying deployment config:', error);
-      const errorMessage = error.response?.data?.error || 'Failed to apply configuration to Cloud Run';
-      toast.error(errorMessage);
-    } finally {
-      setApplyingConfig(false);
-    }
-  };
-
-
   const handleUpdateUserRole = async (userId, newRole) => {
     try {
       await axios.put(`/admin/users/${userId}/role`, {
