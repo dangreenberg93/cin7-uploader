@@ -1009,7 +1009,10 @@ def receive_email_webhook():
         # Lookup client
         client_erp_credentials_id = lookup_client_by_name(client_name)
         if not client_erp_credentials_id:
+            logger.error(f"Client not found: {client_name}")
             return jsonify({'error': f'Client not found: {client_name}'}), 404
+        
+        logger.info(f"Client found - name: {client_name}, credentials_id: {client_erp_credentials_id}")
         
         # Extract CSV
         csv_content, filename, error = extract_csv_from_payload(normalized)
@@ -1027,6 +1030,7 @@ def receive_email_webhook():
         
         # Check for duplicate upload (same filename + client within last hour) - idempotency
         one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        logger.info(f"Checking for duplicate upload - filename: {filename}, client_id: {client_id_for_upload}, client_erp_credentials_id: {client_erp_credentials_id}")
         recent_duplicate = SalesOrderUpload.query.filter_by(
             filename=filename,
             client_id=client_id_for_upload
@@ -1044,12 +1048,15 @@ def receive_email_webhook():
                 'duplicate': True
             }), 200  # Return 200 to prevent Missive from retrying
         
+        logger.info(f"No duplicate found, proceeding with new upload creation")
+        
         # Store CSV content as base64 for preview
         import base64
         csv_base64 = base64.b64encode(csv_content).decode('utf-8')
         
         # Create upload record immediately
         upload_id = uuid.uuid4()
+        logger.info(f"Creating upload record - upload_id: {upload_id}, filename: {filename}, client_erp_credentials_id: {client_erp_credentials_id}, client_id: {client_id_for_upload}")
         upload = SalesOrderUpload(
             id=upload_id,
             user_id=None,  # Webhook has no user context
@@ -1063,7 +1070,13 @@ def receive_email_webhook():
             csv_content=csv_base64  # Store CSV for preview
         )
         db.session.add(upload)
-        db.session.commit()
+        try:
+            db.session.commit()
+            logger.info(f"Upload record created successfully - upload_id: {upload_id}")
+        except Exception as commit_error:
+            logger.error(f"Failed to commit upload record - upload_id: {upload_id}, error: {str(commit_error)}", exc_info=True)
+            db.session.rollback()
+            raise
         
         # Return 200 immediately to acknowledge webhook receipt
         # Process CSV in background thread
@@ -1093,7 +1106,7 @@ def receive_email_webhook():
                             upload.status = 'completed' if failed_count == 0 else 'failed'
                             upload.completed_at = datetime.utcnow()
                         db.session.commit()
-                        logger.info(f"Background processing completed - upload_id: {upload_id}, client: {client_name}, orders: {result.get('total_orders', 0)}")
+                        logger.info(f"Background processing completed - upload_id: {upload_id}, client: {client_name}, orders: {result.get('total_orders', 0)}, successful: {result.get('successful', 0)}, failed: {result.get('failed', 0)}")
             except Exception as e:
                 logger.error(f"Error in background processing for upload {upload_id}: {str(e)}", exc_info=True)
                 try:
