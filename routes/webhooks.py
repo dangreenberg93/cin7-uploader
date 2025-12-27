@@ -401,8 +401,8 @@ def process_single_order(
                     'error': f'Customer "{customer_name}" not found in Cin7'
                 }
         
-        # Build Sale with nested Order (combined approach for all orders)
-        sale_data = builder.build_sale_with_order(order_rows, column_mapping, customer_data=customer_data)
+        # Build Sale payload (without Order - will create separately)
+        sale_data = builder.build_sale(primary_row, column_mapping)
         
         # Get sale type value for "what's needed" payload
         sale_type_setting = settings.get('sale_type', '')
@@ -464,14 +464,17 @@ def process_single_order(
         if 'Type' in missing_required:
             what_is_needed['Type'] = sale_type_value  # Use the determined type
         
-        # Build combined Sale with Order payload to show what would be needed
-        # This matches what we'll actually send (combined approach)
-        combined_payload_for_what_is_needed = builder.build_sale_with_order(order_rows, column_mapping, customer_data=customer_data)
+        # Build Sale Order payload for "what's needed" (separate from Sale)
+        # This shows what the Sale Order payload would look like
+        sale_order_for_what_is_needed = None
+        if len(order_rows) > 1:
+            sale_order_for_what_is_needed = builder.build_sale_order_from_rows(order_rows, column_mapping, '<SALE_ID_PLACEHOLDER>', customer_data=customer_data)
+        else:
+            sale_order_for_what_is_needed = builder.build_sale_order(order_rows[0], column_mapping, '<SALE_ID_PLACEHOLDER>', customer_data=customer_data)
         
         # Debug: Log if lines are empty
-        order_obj = combined_payload_for_what_is_needed.get('Order', {})
-        if not order_obj.get('Lines') or len(order_obj.get('Lines', [])) == 0:
-            logger.warning(f"Warning: Combined payload has no lines for order {order_key}. Column mapping has SKU: {'SKU' in column_mapping}, Price: {'Price' in column_mapping}, Quantity: {'Quantity' in column_mapping}")
+        if sale_order_for_what_is_needed and (not sale_order_for_what_is_needed.get('Lines') or len(sale_order_for_what_is_needed.get('Lines', [])) == 0):
+            logger.warning(f"Warning: Sale Order payload has no lines for order {order_key}. Column mapping has SKU: {'SKU' in column_mapping}, Price: {'Price' in column_mapping}, Quantity: {'Quantity' in column_mapping}")
             logger.warning(f"Primary row keys: {list(primary_row.keys())[:10]}...")  # Log first 10 keys
         
         # Add notes about what needs to be fixed
@@ -483,10 +486,9 @@ def process_single_order(
             for p in missing_products:
                 what_is_needed['_notes'].append(f"Product SKU '{p.get('sku')}' needs to be created in Cin7 first, or SKU corrected")
         
-        # Store the combined payload (what we'll actually send)
-        # Remove internal fields from what_is_needed before storing
-        what_is_needed_clean = {k: v for k, v in what_is_needed.items() if not k.startswith('_')}
-        what_is_needed['_combined_payload'] = combined_payload_for_what_is_needed  # Store the complete combined payload
+        # Store the payloads (what we'll actually send)
+        what_is_needed['_sale_payload'] = sale_data  # Store the sale payload
+        what_is_needed['_sale_order_payload'] = sale_order_for_what_is_needed  # Store the sale order payload
         
         # Check if we should even attempt to send to Cin7
         # CustomerID is required - if we don't have it, don't send
@@ -504,7 +506,8 @@ def process_single_order(
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
-                'sale_payload': sale_data,  # Store what we would have sent (combined payload)
+                'sale_payload': sale_data,  # Store what we would have sent (sale payload)
+                'sale_order_payload': sale_order_for_what_is_needed,  # Store what we would have sent (sale order payload)
                 'what_is_needed': what_is_needed,  # Store what's needed
                 'attempted_send': False  # Flag to indicate we didn't actually send
             }
@@ -517,32 +520,23 @@ def process_single_order(
                 'matching_details': matching_details
             }
         
-        # Create Sale with nested Order via API (single call for all orders)
-        logger.info(f"Creating Sale with nested Order (combined) for order {order_key}...")
-        success, message, response = api_client.create_sale(sale_data)
-        sale_api_response = response if response else None
-        sale_order_api_response = None  # Combined in same response
-        
-        # Extract both Sale ID and Sale Order ID from response
+        # Step 1: Create Sale first
+        logger.info(f"Creating Sale for order {order_key}...")
+        sale_success, sale_message, sale_response = api_client.create_sale(sale_data)
+        sale_api_response = sale_response if sale_response else None
         sale_id = None
-        sale_order_id = None
-        if isinstance(response, dict):
-            sale_id = response.get('ID')
-            # Check if Order is in response
-            order_data = response.get('Order')
-            if order_data:
-                sale_order_id = order_data.get('ID')
-        elif isinstance(response, list) and len(response) > 0:
-            first_item = response[0] if isinstance(response[0], dict) else None
+        
+        # Extract Sale ID from response
+        if isinstance(sale_response, dict):
+            sale_id = sale_response.get('ID')
+        elif isinstance(sale_response, list) and len(sale_response) > 0:
+            first_item = sale_response[0] if isinstance(sale_response[0], dict) else None
             if first_item:
                 sale_id = first_item.get('ID')
-                order_data = first_item.get('Order')
-                if order_data:
-                    sale_order_id = order_data.get('ID')
         
-        if not success:
+        if not sale_success:
             # Enhance error message with matching details
-            error_parts = [f'Failed to create Sale: {message}']
+            error_parts = [f'Failed to create Sale: {sale_message}']
             
             if not matching_details['customer'].get('found'):
                 error_parts.append(f"Customer issue: {matching_details['customer'].get('error', 'Customer not found')}")
@@ -563,10 +557,10 @@ def process_single_order(
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
-                'sale_payload': sale_data,  # Store the combined payload that was attempted
-                'sale_api_response': sale_api_response,  # Store the API response
-                'what_is_needed': what_is_needed,  # Store what the complete payload should look like
-                'attempted_send': True  # Flag to indicate we did attempt to send
+                'sale_payload': sale_data,
+                'sale_api_response': sale_api_response,
+                'what_is_needed': what_is_needed,
+                'attempted_send': True
             }
             order_result.processed_at = datetime.utcnow()
             db.session.commit()
@@ -577,30 +571,92 @@ def process_single_order(
                 'matching_details': matching_details
             }
         
-        # Handle response - Sale and Order created in one call
         if not sale_id:
             order_result.status = 'failed'
-            order_result.error_message = 'Sale with Order created but no Sale ID returned'
-            order_result.error_type = categorize_error('Sale with Order created but no Sale ID returned')
-            order_result.order_data = order_data
+            order_result.error_message = 'Sale created but no Sale ID returned'
+            order_result.error_type = categorize_error('Sale created but no Sale ID returned')
+            order_result.order_data = {
+                **order_data,
+                'matching_details': matching_details,
+                'sale_payload': sale_data,
+                'sale_api_response': sale_api_response,
+                'what_is_needed': what_is_needed,
+                'attempted_send': True
+            }
             order_result.processed_at = datetime.utcnow()
             db.session.commit()
             return {
                 'status': 'failed',
-                'error_message': 'Sale with Order created but no Sale ID returned',
-                'order_data': order_data
+                'error_message': 'Sale created but no Sale ID returned',
+                'order_data': order_result.order_data
             }
         
-        # Success - both Sale and Order were created
+        # Step 2: Get customer and sale data for TaxRule lookup (needed for sale order)
+        sale_data_from_api = None
+        if sale_id:
+            try:
+                sale_data_from_api = api_client.get_sale(str(sale_id))
+            except Exception as sale_lookup_error:
+                logger.warning(f"Warning: Could not retrieve Sale data for TaxRule: {str(sale_lookup_error)}")
+        
+        # Step 3: Build and create Sale Order with the Sale ID
+        logger.info(f"Creating Sale Order for order {order_key} with Sale ID {sale_id}...")
+        
+        # Build sale order payload
+        if len(order_rows) > 1:
+            sale_order_data = builder.build_sale_order_from_rows(order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_api)
+        else:
+            sale_order_data = builder.build_sale_order(order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_api)
+        
+        # Create Sale Order via API
+        so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
+        sale_order_api_response = so_response if so_response else None
+        sale_order_id = None
+        
+        # Extract Sale Order ID from response
+        if isinstance(so_response, dict):
+            sale_order_id = so_response.get('ID')
+        elif isinstance(so_response, list) and len(so_response) > 0:
+            first_item = so_response[0] if isinstance(so_response[0], dict) else None
+            if first_item:
+                sale_order_id = first_item.get('ID')
+        
+        if not so_success:
+            # Sale was created but Sale Order failed
+            order_result.status = 'failed'
+            order_result.error_message = f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}'
+            order_result.error_type = categorize_error(f'Sale created but Sale Order failed: {so_message}')
+            order_result.sale_id = sale_id  # Store the sale ID even though order failed
+            order_result.order_data = {
+                **order_data,
+                'matching_details': matching_details,
+                'sale_payload': sale_data,
+                'sale_order_payload': sale_order_data,
+                'sale_api_response': sale_api_response,
+                'sale_order_api_response': sale_order_api_response,
+                'what_is_needed': what_is_needed,
+                'attempted_send': True
+            }
+            order_result.processed_at = datetime.utcnow()
+            db.session.commit()
+            return {
+                'status': 'failed',
+                'error_message': f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}',
+                'order_data': order_result.order_data,
+                'matching_details': matching_details
+            }
+        
+        # Success - both Sale and Sale Order were created
         order_result.status = 'success'
         order_result.sale_id = sale_id
         order_result.sale_order_id = sale_order_id if sale_order_id else None
         order_result.order_data = {
             **order_data,
             'matching_details': matching_details,
-            'sale_payload': sale_data,  # Store the combined payload that was sent
-            'sale_api_response': sale_api_response,  # Store the API response (contains both Sale and Order)
-            'sale_order_api_response': sale_order_api_response  # Same response for combined approach
+            'sale_payload': sale_data,
+            'sale_order_payload': sale_order_data,
+            'sale_api_response': sale_api_response,
+            'sale_order_api_response': sale_order_api_response
         }
         order_result.processed_at = datetime.utcnow()
         db.session.commit()
@@ -1379,7 +1435,11 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
         select_fields = [
             'cec.id',
             'cec.cin7_api_auth_accountid as account_id',
-            'cec.cin7_api_auth_applicationkey as application_key'
+            'cec.cin7_api_auth_applicationkey as application_key',
+            'cec.client_id',
+            'cec.sale_type',
+            'cec.tax_rule',
+            'cec.default_status'
         ]
         
         if 'customer_account_receivable' in existing_customer_cols:
@@ -1402,16 +1462,62 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
         if not cred_row:
             return None, 'Credentials not found'
         
+        # Extract values from cred_row
+        account_id = cred_row.account_id
+        application_key = cred_row.application_key
+        sale_type = getattr(cred_row, 'sale_type', None)
+        tax_rule = getattr(cred_row, 'tax_rule', None)
+        default_status = getattr(cred_row, 'default_status', None)
+        
+        # Extract customer default fields
+        customer_account_receivable = None
+        customer_revenue_account = None
+        customer_tax_rule = None
+        customer_attribute_set = None
+        
+        if 'customer_account_receivable' in existing_customer_cols and hasattr(cred_row, 'customer_account_receivable'):
+            customer_account_receivable = cred_row.customer_account_receivable if cred_row.customer_account_receivable else None
+        if 'customer_revenue_account' in existing_customer_cols and hasattr(cred_row, 'customer_revenue_account'):
+            customer_revenue_account = cred_row.customer_revenue_account if cred_row.customer_revenue_account else None
+        if 'customer_tax_rule' in existing_customer_cols and hasattr(cred_row, 'customer_tax_rule'):
+            customer_tax_rule = str(cred_row.customer_tax_rule) if cred_row.customer_tax_rule else None
+        if 'customer_attribute_set' in existing_customer_cols and hasattr(cred_row, 'customer_attribute_set'):
+            customer_attribute_set = cred_row.customer_attribute_set
+        
         # Get settings
-        settings_query = text("""
-            SELECT cs.settings
-            FROM cin7_uploader.client_settings cs
-            JOIN voyager.client_erp_credentials cec ON cec.client_id = cs.client_id
-            WHERE cec.id = :cred_id
-        """)
-        settings_result = db.session.execute(settings_query, {'cred_id': client_erp_credentials_id})
-        settings_row = settings_result.fetchone()
-        settings = settings_row.settings if settings_row and settings_row.settings else {}
+        settings_obj = None
+        if cred_row.client_id:
+            settings_obj = ClientSettings.query.filter_by(client_id=cred_row.client_id).first()
+        
+        settings = {}
+        if settings_obj:
+            settings = {
+                'default_status': default_status or settings_obj.default_status,
+                'default_currency': settings_obj.default_currency,
+                'tax_inclusive': settings_obj.tax_inclusive,
+                'default_location': settings_obj.default_location,
+                'default_delay_between_orders': settings_obj.default_delay_between_orders,
+                'sale_type': sale_type,
+                'tax_rule': tax_rule,
+                'customer_account_receivable': customer_account_receivable,
+                'customer_revenue_account': customer_revenue_account,
+                'customer_tax_rule': customer_tax_rule,
+                'customer_attribute_set': customer_attribute_set
+            }
+        else:
+            settings = {
+                'default_status': default_status or 'DRAFT',
+                'default_currency': 'USD',
+                'tax_inclusive': False,
+                'default_location': None,
+                'default_delay_between_orders': 0.7,
+                'sale_type': sale_type,
+                'tax_rule': tax_rule,
+                'customer_account_receivable': customer_account_receivable,
+                'customer_revenue_account': customer_revenue_account,
+                'customer_tax_rule': customer_tax_rule,
+                'customer_attribute_set': customer_attribute_set
+            }
         
         # Initialize API client and builder
         api_client = Cin7SalesAPI(

@@ -6,13 +6,17 @@ import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
-import { ChevronDown, ChevronRight, RefreshCw, CheckCircle2, XCircle, Clock, FileText, RotateCcw, Eye, Download, Code, AlertCircle, CheckSquare, Square } from 'lucide-react';
+import { Checkbox } from './ui/checkbox';
+import { ChevronDown, ChevronRight, RefreshCw, CheckCircle2, XCircle, Clock, FileText, RotateCcw, Eye, Download, Code, AlertCircle } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { cn } from '../lib/utils';
 
 const QueueView = () => {
   const [uploads, setUploads] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [expandedUploads, setExpandedUploads] = useState(new Set());
   const [csvModalOpen, setCsvModalOpen] = useState(false);
   const [csvContent, setCsvContent] = useState('');
@@ -29,6 +33,7 @@ const QueueView = () => {
   // Failed Orders tab state
   const [failedOrders, setFailedOrders] = useState([]);
   const [failedOrdersLoading, setFailedOrdersLoading] = useState(true);
+  const [isFailedOrdersInitialLoad, setIsFailedOrdersInitialLoad] = useState(true);
   const [selectedOrderIds, setSelectedOrderIds] = useState(new Set());
   const [errorTypeFilter, setErrorTypeFilter] = useState('');
   const [expandedFailedOrders, setExpandedFailedOrders] = useState(new Set());
@@ -36,13 +41,19 @@ const QueueView = () => {
   // Completed Orders tab state
   const [completedOrders, setCompletedOrders] = useState([]);
   const [completedOrdersLoading, setCompletedOrdersLoading] = useState(true);
+  const [isCompletedOrdersInitialLoad, setIsCompletedOrdersInitialLoad] = useState(true);
   const [expandedCompletedOrders, setExpandedCompletedOrders] = useState(new Set());
 
-  const loadQueue = async () => {
+  const loadQueue = async (isRefresh = false) => {
     try {
-      setLoading(true);
+      if (!isRefresh) {
+        setLoading(true);
+      }
       const response = await axios.get('/webhooks/queue');
       setUploads(response.data.uploads || []);
+      if (isInitialLoad) {
+        setIsInitialLoad(false);
+      }
     } catch (error) {
       console.error('Failed to load queue:', error);
       if (error.response?.status === 401) {
@@ -105,11 +116,16 @@ const QueueView = () => {
     }
   }, [jsonModalOpen, viewingOrderPayload]);
 
-  const loadFailedOrders = async () => {
+  const loadFailedOrders = async (isRefresh = false) => {
     try {
-      setFailedOrdersLoading(true);
+      if (!isRefresh) {
+        setFailedOrdersLoading(true);
+      }
       const response = await axios.get('/webhooks/orders/failed');
       setFailedOrders(response.data.failed_orders || []);
+      if (isFailedOrdersInitialLoad) {
+        setIsFailedOrdersInitialLoad(false);
+      }
     } catch (error) {
       console.error('Failed to load failed orders:', error);
       if (error.response?.status === 401) {
@@ -122,11 +138,16 @@ const QueueView = () => {
     }
   };
 
-  const loadCompletedOrders = async () => {
+  const loadCompletedOrders = async (isRefresh = false) => {
     try {
-      setCompletedOrdersLoading(true);
+      if (!isRefresh) {
+        setCompletedOrdersLoading(true);
+      }
       const response = await axios.get('/webhooks/orders/completed');
       setCompletedOrders(response.data.completed_orders || []);
+      if (isCompletedOrdersInitialLoad) {
+        setIsCompletedOrdersInitialLoad(false);
+      }
     } catch (error) {
       console.error('Failed to load completed orders:', error);
       if (error.response?.status === 401) {
@@ -139,15 +160,28 @@ const QueueView = () => {
     }
   };
 
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        loadQueue(true),
+        loadFailedOrders(true),
+        loadCompletedOrders(true)
+      ]);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   useEffect(() => {
     loadQueue();
     loadFailedOrders();
     loadCompletedOrders();
-    // Refresh every 30 seconds
+    // Refresh every 30 seconds (silent refresh)
     const interval = setInterval(() => {
-      loadQueue();
-      loadFailedOrders();
-      loadCompletedOrders();
+      loadQueue(true);
+      loadFailedOrders(true);
+      loadCompletedOrders(true);
     }, 30000);
     return () => clearInterval(interval);
   }, []);
@@ -197,12 +231,12 @@ const QueueView = () => {
       const response = await axios.post(`/webhooks/retry/${orderResultId}`);
       if (response.data.status === 'success') {
         toast.success('Order retried successfully!');
-        loadQueue();
-        loadFailedOrders();
+        loadQueue(true);
+        loadFailedOrders(true);
       } else {
         toast.error(`Retry failed: ${response.data.error_message || 'Unknown error'}`);
-        loadQueue();
-        loadFailedOrders();
+        loadQueue(true);
+        loadFailedOrders(true);
       }
     } catch (error) {
       console.error('Failed to retry order:', error);
@@ -233,8 +267,8 @@ const QueueView = () => {
       }
       
       setSelectedOrderIds(new Set());
-      loadQueue();
-      loadFailedOrders();
+      loadQueue(true);
+      loadFailedOrders(true);
     } catch (error) {
       console.error('Failed to bulk retry orders:', error);
       toast.error(error.response?.data?.error || 'Failed to bulk retry orders');
@@ -245,7 +279,7 @@ const QueueView = () => {
     try {
       await axios.post(`/webhooks/orders/${orderId}/resolve`, { reason });
       toast.success('Order marked as resolved');
-      loadFailedOrders();
+      loadFailedOrders(true);
     } catch (error) {
       console.error('Failed to resolve order:', error);
       toast.error(error.response?.data?.error || 'Failed to resolve order');
@@ -266,28 +300,28 @@ const QueueView = () => {
       await Promise.all(promises);
       toast.success(`${selectedOrderIds.size} order(s) marked as resolved`);
       setSelectedOrderIds(new Set());
-      loadFailedOrders();
+      loadFailedOrders(true);
     } catch (error) {
       console.error('Failed to bulk resolve orders:', error);
       toast.error('Failed to bulk resolve orders');
     }
   };
 
-  const toggleSelectOrder = (orderId) => {
+  const toggleSelectOrder = (orderId, checked) => {
     const newSelected = new Set(selectedOrderIds);
-    if (newSelected.has(orderId)) {
-      newSelected.delete(orderId);
-    } else {
+    if (checked) {
       newSelected.add(orderId);
+    } else {
+      newSelected.delete(orderId);
     }
     setSelectedOrderIds(newSelected);
   };
 
-  const toggleSelectAll = () => {
-    if (selectedOrderIds.size === failedOrders.length) {
-      setSelectedOrderIds(new Set());
-    } else {
+  const toggleSelectAll = (checked) => {
+    if (checked) {
       setSelectedOrderIds(new Set(failedOrders.map(o => o.id)));
+    } else {
+      setSelectedOrderIds(new Set());
     }
   };
 
@@ -379,13 +413,19 @@ const QueueView = () => {
     }
   };
 
-  const renderPayloadTable = (payload, title, showOrderHeader = false, matchingDetails = null) => {
+  const renderPayloadTable = (payload, title, showOrderHeader = false, matchingDetails = null, orderContext = null) => {
     if (!payload || typeof payload !== 'object') return null;
+    
+    // For completed orders, check if sale was created (means customer was found)
+    const isCompletedOrder = orderContext?.sale_id || orderContext?.sale_order_id;
+    const customerIdInPayload = payload.CustomerID && typeof payload.CustomerID === 'string' && !payload.CustomerID.includes('<REQUIRED:');
+    const customerWasFound = isCompletedOrder || customerIdInPayload;
     
     // Check if it's a sale_order_payload (has Lines array)
     if (payload.Lines && Array.isArray(payload.Lines)) {
       return (
-        <div className="space-y-3">
+        <TooltipProvider>
+          <div className="space-y-3">
           {/* Order Details fields (non-Lines fields) - only show if showOrderHeader is true */}
           {showOrderHeader && Object.keys(payload).filter(k => k !== 'Lines').length > 0 && (
             <div>
@@ -400,7 +440,7 @@ const QueueView = () => {
                   </TableHeader>
                   <TableBody>
                     {Object.entries(payload)
-                      .filter(([key]) => key !== 'Lines')
+                      .filter(([key]) => key !== 'Lines' && key !== 'CustomerID')
                       .map(([key, value]) => {
                         const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
                         const isEmpty = value === null || value === undefined || value === '';
@@ -408,7 +448,11 @@ const QueueView = () => {
                         
                         // Special handling for Customer field
                         const isCustomerField = key === 'Customer' || key === 'customer_name';
-                        const customerNotMatched = isCustomerField && matchingDetails?.customer && !matchingDetails.customer.found;
+                        // Only show "not found" if matchingDetails says not found AND customer wasn't actually found (no sale_id/CustomerID)
+                        const customerNotMatched = isCustomerField && matchingDetails?.customer && !matchingDetails.customer.found && !customerWasFound;
+                        // Check if customer was matched - get ID from payload first, then matching details
+                        const customerId = (payload.CustomerID && String(payload.CustomerID)) || (matchingDetails?.customer?.cin7_id && String(matchingDetails.customer.cin7_id)) || null;
+                        const customerMatched = isCustomerField && customerWasFound && customerId;
                         
                         return (
                           <TableRow key={key} className={`bg-white ${isMissing ? 'bg-orange-50' : ''}`}>
@@ -416,6 +460,18 @@ const QueueView = () => {
                             <TableCell className={`text-xs bg-white ${customerNotMatched ? 'text-red-600' : isPlaceholder ? 'text-orange-600 font-medium italic' : isEmpty ? 'text-orange-600 italic' : 'text-gray-900'}`}>
                               <div className="flex items-center gap-1.5">
                                 <span>{isPlaceholder ? value : (isEmpty ? <span className="italic">(missing)</span> : String(value))}</span>
+                                {customerMatched && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="inline-flex items-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help text-[10px] px-1.5 py-0 h-4 font-semibold font-sans text-white shadow-none">
+                                        Matched
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="bg-black text-white">
+                                      <p className="text-xs">ID: {String(customerId || 'N/A')}</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                )}
                                 {customerNotMatched && (
                                   <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">Not found in Cin7</Badge>
                                 )}
@@ -454,14 +510,24 @@ const QueueView = () => {
                         // Find matching product details
                         const productMatch = matchingDetails?.products?.find(p => p.sku === line.SKU);
                         const isMatched = productMatch?.found && line.ProductID && !hasPlaceholder;
+                        const productId = (line.ProductID && String(line.ProductID)) || (productMatch?.cin7_id && String(productMatch.cin7_id)) || null;
                         
                         return (
                           <TableRow key={idx} className={`bg-white ${hasMissingFields && !isMatched ? 'bg-orange-50' : ''}`}>
                             <TableCell className={`font-mono text-xs bg-white ${isMatched ? 'text-green-600' : !line.SKU ? 'text-orange-600 italic' : 'text-gray-900'}`}>
                               <div className="flex items-center gap-1.5">
                                 <span>{line.SKU || <span className="italic">(missing)</span>}</span>
-                                {isMatched && (
-                                  <Badge variant="default" className="bg-green-500 text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-green-500 font-sans">Matched</Badge>
+                                {isMatched && productId && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="inline-flex items-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help text-[10px] px-1.5 py-0 h-4 font-semibold font-sans text-white shadow-none">
+                                        Matched
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="bg-black text-white">
+                                      <p className="text-xs">ID: {String(productId || 'N/A')}</p>
+                                    </TooltipContent>
+                                  </Tooltip>
                                 )}
                               </div>
                             </TableCell>
@@ -485,12 +551,14 @@ const QueueView = () => {
               </div>
             )}
           </div>
-        </div>
+          </div>
+        </TooltipProvider>
       );
     } else {
       // Regular payload (sale_payload - order header only)
       return (
-        <div>
+        <TooltipProvider>
+          <div>
           <div className="text-xs font-semibold text-gray-700 mb-1">{title}</div>
           <div className="border-[0.5px] rounded-md overflow-hidden bg-white">
             <Table>
@@ -501,14 +569,20 @@ const QueueView = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {Object.entries(payload).map(([key, value]) => {
+                {Object.entries(payload)
+                  .filter(([key]) => key !== 'CustomerID')
+                  .map(([key, value]) => {
                   const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
                   const isEmpty = value === null || value === undefined || value === '';
                   const isMissing = isPlaceholder || isEmpty;
                   
                   // Special handling for Customer field
                   const isCustomerField = key === 'Customer' || key === 'customer_name';
-                  const customerNotMatched = isCustomerField && matchingDetails?.customer && !matchingDetails.customer.found;
+                  // Only show "not found" if matchingDetails says not found AND customer wasn't actually found (no sale_id/CustomerID)
+                  const customerNotMatched = isCustomerField && matchingDetails?.customer && !matchingDetails.customer.found && !customerWasFound;
+                  // Check if customer was matched - get ID from payload first, then matching details
+                  const customerId = (payload.CustomerID && String(payload.CustomerID)) || (matchingDetails?.customer?.cin7_id && String(matchingDetails.customer.cin7_id)) || null;
+                  const customerMatched = isCustomerField && customerWasFound && customerId;
                   
                   return (
                     <TableRow key={key} className={`bg-white ${isMissing ? 'bg-orange-50' : ''}`}>
@@ -520,6 +594,18 @@ const QueueView = () => {
                           ) : (
                             <span>{isEmpty ? <span className="italic">(missing)</span> : String(value)}</span>
                           )}</span>
+                          {customerMatched && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="inline-flex items-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help text-[10px] px-1.5 py-0 h-4 font-semibold font-sans text-white shadow-none">
+                                  Matched
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p className="text-xs">ID: {customerId}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
                           {customerNotMatched && (
                             <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">Not found in Cin7</Badge>
                           )}
@@ -532,6 +618,7 @@ const QueueView = () => {
             </Table>
           </div>
         </div>
+        </TooltipProvider>
       );
     }
   };
@@ -546,33 +633,49 @@ const QueueView = () => {
               View order processing results from email webhooks
             </p>
           </div>
-          <Button onClick={() => { loadQueue(); loadFailedOrders(); loadCompletedOrders(); }} disabled={loading || failedOrdersLoading || completedOrdersLoading} variant="outline">
-            <RefreshCw className={cn("h-4 w-4 mr-2", (loading || failedOrdersLoading || completedOrdersLoading) && "animate-spin")} />
+          <Button onClick={handleRefresh} variant="outline" disabled={isRefreshing}>
+            <RefreshCw className={cn("h-4 w-4 mr-2", isRefreshing && "animate-spin")} />
             Refresh
           </Button>
         </div>
 
         <Tabs defaultValue="failed" className="w-full">
-          <TabsList className="h-9 p-1">
-            <TabsTrigger value="failed" className="text-xs py-1.5 px-3">
-              Failed Orders
-              {failedOrders.length > 0 && (
-                <Badge variant="destructive" className="ml-1.5 text-[10px] px-1.5 py-0 h-4">{failedOrders.length}</Badge>
+          <div className="flex items-center justify-between mb-4">
+            <TabsList className="h-9 p-1">
+              <TabsTrigger value="failed" className="text-xs py-1.5 px-3">
+                Failed Orders
+                {failedOrders.length > 0 && (
+                  <Badge variant="destructive" className="ml-1.5 text-[10px] px-1.5 py-0 h-4">{failedOrders.length}</Badge>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="completed" className="text-xs py-1.5 px-3">
+                Completed Orders
+                {completedOrders.length > 0 && (
+                  <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 bg-green-500">{completedOrders.length}</Badge>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="uploads" className="text-xs py-1.5 px-3">All Uploads</TabsTrigger>
+            </TabsList>
+            {/* Bulk Actions */}
+            <div className="flex items-center gap-2" style={{ minHeight: '36px' }}>
+              {selectedOrderIds.size > 0 && (
+                <>
+                  <Button onClick={bulkRetryOrders} variant="default" size="sm" className="h-7 text-xs px-2">
+                    <RotateCcw className="h-3 w-3 mr-1.5" />
+                    Retry ({selectedOrderIds.size})
+                  </Button>
+                  <Button onClick={bulkResolveOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
+                    Resolve ({selectedOrderIds.size})
+                  </Button>
+                </>
               )}
-            </TabsTrigger>
-            <TabsTrigger value="completed" className="text-xs py-1.5 px-3">
-              Completed Orders
-              {completedOrders.length > 0 && (
-                <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 bg-green-500">{completedOrders.length}</Badge>
-              )}
-            </TabsTrigger>
-            <TabsTrigger value="uploads" className="text-xs py-1.5 px-3">All Uploads</TabsTrigger>
-          </TabsList>
+            </div>
+          </div>
 
           <TabsContent value="uploads">
             {/* Uploads Table */}
             <div className="overflow-x-auto">
-          {loading ? (
+          {loading && isInitialLoad ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
           ) : uploads.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">No uploads found</div>
@@ -804,24 +907,9 @@ const QueueView = () => {
           <TabsContent value="failed">
             {/* Failed Orders View */}
             <div className="space-y-4">
-              {/* Bulk Actions */}
-              <div className="flex items-center justify-end">
-                {selectedOrderIds.size > 0 && (
-                  <div className="flex items-center gap-2">
-                    <Button onClick={bulkRetryOrders} variant="default" size="sm" className="h-7 text-xs px-2">
-                      <RotateCcw className="h-3 w-3 mr-1.5" />
-                      Retry ({selectedOrderIds.size})
-                    </Button>
-                    <Button onClick={bulkResolveOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
-                      Resolve ({selectedOrderIds.size})
-                    </Button>
-                  </div>
-                )}
-              </div>
-
               {/* Failed Orders Table */}
               <div className="overflow-x-auto">
-                {failedOrdersLoading ? (
+                {failedOrdersLoading && isFailedOrdersInitialLoad ? (
                   <div className="text-center py-8 text-muted-foreground">Loading...</div>
                 ) : failedOrders.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">No failed orders found</div>
@@ -830,13 +918,10 @@ const QueueView = () => {
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-10">
-                          <button onClick={toggleSelectAll} className="p-0.5">
-                            {selectedOrderIds.size === failedOrders.length ? (
-                              <CheckSquare className="h-3.5 w-3.5" />
-                            ) : (
-                              <Square className="h-3.5 w-3.5" />
-                            )}
-                          </button>
+                          <Checkbox
+                            checked={selectedOrderIds.size === failedOrders.length && failedOrders.length > 0}
+                            onCheckedChange={toggleSelectAll}
+                          />
                         </TableHead>
                         <TableHead className="w-10"></TableHead>
                         <TableHead className="text-xs font-semibold">Order</TableHead>
@@ -857,12 +942,11 @@ const QueueView = () => {
                         return (
                           <React.Fragment key={order.id}>
                             <TableRow className="cursor-pointer hover:bg-muted/50">
-                              <TableCell className="text-xs" onClick={(e) => { e.stopPropagation(); toggleSelectOrder(order.id); }}>
-                                {isSelected ? (
-                                  <CheckSquare className="h-3.5 w-3.5" />
-                                ) : (
-                                  <Square className="h-3.5 w-3.5" />
-                                )}
+                              <TableCell className="text-xs" onClick={(e) => { e.stopPropagation(); }}>
+                                <Checkbox
+                                  checked={isSelected}
+                                  onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
+                                />
                               </TableCell>
                               <TableCell className="text-xs" onClick={() => toggleExpandFailedOrder(order.id)}>
                                 {isExpanded ? (
@@ -998,7 +1082,7 @@ const QueueView = () => {
             <div className="space-y-4">
               {/* Completed Orders Table */}
               <div className="overflow-x-auto">
-                {completedOrdersLoading ? (
+                {completedOrdersLoading && isCompletedOrdersInitialLoad ? (
                   <div className="text-center py-8 text-muted-foreground">Loading...</div>
                 ) : completedOrders.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">No completed orders found</div>
@@ -1018,6 +1102,13 @@ const QueueView = () => {
                     <TableBody>
                       {completedOrders.map((order) => {
                         const isExpanded = expandedCompletedOrders.has(order.id);
+                        // Extract customer and PO from sale_payload if not in order data
+                        const customerName = order.customer_name || 
+                          (order.sale_payload && (order.sale_payload.Customer || order.sale_payload.customer_name)) || 
+                          '-';
+                        const poNumber = order.po_number || 
+                          (order.sale_payload && (order.sale_payload.CustomerReference || order.sale_payload.customer_reference)) || 
+                          '-';
                         
                         return (
                           <React.Fragment key={order.id}>
@@ -1057,7 +1148,7 @@ const QueueView = () => {
                                 }
                                 setExpandedCompletedOrders(newExpanded);
                               }}>
-                                {order.customer_name || '-'}
+                                {customerName}
                               </TableCell>
                               <TableCell onClick={() => {
                                 const newExpanded = new Set(expandedCompletedOrders);
@@ -1068,7 +1159,7 @@ const QueueView = () => {
                                 }
                                 setExpandedCompletedOrders(newExpanded);
                               }}>
-                                {order.po_number || '-'}
+                                {poNumber}
                               </TableCell>
                               <TableCell onClick={() => {
                                 const newExpanded = new Set(expandedCompletedOrders);
@@ -1123,19 +1214,26 @@ const QueueView = () => {
                               <TableRow>
                                 <TableCell colSpan={8} className="bg-muted/30">
                                   <div className="p-4 space-y-4">
-                                    {/* Success Message */}
-                                    <div>
-                                      <div className="font-semibold text-sm mb-2 text-green-600">✓ Successfully Created in Cin7</div>
-                                      <div className="text-sm bg-green-50 p-3 rounded border border-green-200">
-                                        {order.sale_id && (
-                                          <div className="mb-2">
-                                            <span className="font-medium">Sale ID:</span> {order.sale_id}
-                                          </div>
-                                        )}
-                                        {order.sale_order_id && (
-                                          <div>
-                                            <span className="font-medium">Sale Order ID:</span> {order.sale_order_id}
-                                          </div>
+                                    {/* Order Header with Actions */}
+                                    <div className="flex items-center justify-between mb-2">
+                                      <div>
+                                        <div className="font-semibold text-sm mb-2 text-green-600">✓ Successfully Created in Cin7</div>
+                                      </div>
+                                      <div className="flex items-center gap-1">
+                                        {(order.sale_payload || order.sale_order_payload || order.what_is_needed || order.order_data) && (
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setViewingOrderPayload(order);
+                                              setJsonModalOpen(true);
+                                            }}
+                                            className="h-7 w-7 p-0"
+                                            title="View JSON payloads (dev)"
+                                          >
+                                            <Code className="h-3 w-3 text-muted-foreground" />
+                                          </Button>
                                         )}
                                       </div>
                                     </div>
@@ -1145,52 +1243,12 @@ const QueueView = () => {
                                       <div>
                                         <div className="font-semibold text-sm mb-2">Created Payload</div>
                                         <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                                          {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details)}
-                                          {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details)}
+                                          {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
+                                          {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
                                         </div>
                                       </div>
                                     )}
 
-                                    {/* Matching Details */}
-                                    {order.matching_details && (
-                                      <div>
-                                        <div className="font-semibold text-sm mb-2 text-gray-700">Matching Details</div>
-                                        <div className="border rounded-md overflow-hidden bg-white">
-                                          <Table>
-                                            <TableHeader>
-                                              <TableRow className="bg-gray-50">
-                                                <TableHead className="w-1/3 font-semibold text-xs">Item</TableHead>
-                                                <TableHead className="font-semibold text-xs">Status</TableHead>
-                                              </TableRow>
-                                            </TableHeader>
-                                            <TableBody>
-                                              <TableRow>
-                                                <TableCell className="text-xs bg-white">Customer</TableCell>
-                                                <TableCell className="text-xs bg-white">
-                                                  {order.matching_details.customer?.found ? (
-                                                    <span className="text-green-600">✓ Found (ID: {order.matching_details.customer.cin7_id})</span>
-                                                  ) : (
-                                                    <span className="text-red-600">✗ {order.matching_details.customer?.error || 'Not found'}</span>
-                                                  )}
-                                                </TableCell>
-                                              </TableRow>
-                                              {order.matching_details.products?.map((product, idx) => (
-                                                <TableRow key={idx}>
-                                                  <TableCell className="text-xs bg-white">SKU {product.sku}</TableCell>
-                                                  <TableCell className="text-xs bg-white">
-                                                    {product.found ? (
-                                                      <span className="text-green-600">✓ Found (ID: {product.cin7_id})</span>
-                                                    ) : (
-                                                      <span className="text-red-600">✗ {product.error || 'Not found'}</span>
-                                                    )}
-                                                  </TableCell>
-                                                </TableRow>
-                                              ))}
-                                            </TableBody>
-                                          </Table>
-                                        </div>
-                                      </div>
-                                    )}
                                   </div>
                                 </TableCell>
                               </TableRow>
