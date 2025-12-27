@@ -175,7 +175,7 @@ class CSVParser:
             'SaleOrderNumber': ['sale_order_number', 'saleordernumber', 'sale order number', 'order_number', 'order number', 'order', 'order_id', 'orderid'],
             'InvoiceNumber': ['invoice_number', 'invoicenumber', 'invoice number', 'invoice #', 'invoice#', 'invoice', 'invoice_id', 'invoiceid'],
             'CustomerReference': ['customer_reference', 'customerreference', 'customer reference', 'reference', 'ref', 'po_number', 'po number', 'po'],
-            'SaleDate': ['sale_date', 'saledate', 'sale date', 'date', 'order_date', 'order date'],
+            'SaleOrderDate': ['sale_order_date', 'saleorderdate', 'sale order date', 'sale_date', 'saledate', 'sale date', 'date', 'order_date', 'order date'],
             'Status': ['status', 'order_status', 'order status'],
             'Location': ['location', 'warehouse', 'location_id', 'locationid'],
             'Currency': ['currency', 'currency_code', 'currencycode'],

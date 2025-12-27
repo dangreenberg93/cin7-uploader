@@ -27,6 +27,8 @@ class SalesOrderBuilder:
         self._product_cache = {}  # Cache product lookups by SKU
         self.preloaded_customers = preloaded_customers or {}  # Use preloaded data if available
         self.preloaded_products = preloaded_products or {}  # Use preloaded data if available
+        self._current_customer_data = None  # Store current customer data for TaxRule lookup
+        self._current_sale_data = None  # Store current sale data for TaxRule lookup
     
     def build_sale(self, row_data: Dict[str, Any], column_mapping: Dict[str, str]) -> Dict[str, Any]:
         """
@@ -221,19 +223,99 @@ class SalesOrderBuilder:
         if 'CustomerReference' in mapped and mapped['CustomerReference']:
             sale['CustomerReference'] = mapped['CustomerReference']
         
-        # SaleDate (Order Date)
-        if 'SaleDate' in mapped and mapped['SaleDate']:
+        # SaleOrderDate (Order Date) - Cin7 uses SaleOrderDate, not SaleDate
+        if 'SaleOrderDate' in mapped and mapped['SaleOrderDate']:
+            from cin7_sales.csv_parser import CSVParser
+            parser = CSVParser()
+            parsed_date = parser._parse_date(mapped['SaleOrderDate'], None)
+            if parsed_date:
+                sale['SaleOrderDate'] = parsed_date
+            else:
+                sale['SaleOrderDate'] = mapped['SaleOrderDate']
+        # Also support legacy SaleDate mapping for backward compatibility
+        elif 'SaleDate' in mapped and mapped['SaleDate']:
             from cin7_sales.csv_parser import CSVParser
             parser = CSVParser()
             parsed_date = parser._parse_date(mapped['SaleDate'], None)
             if parsed_date:
-                sale['SaleDate'] = parsed_date
+                sale['SaleOrderDate'] = parsed_date
             else:
-                sale['SaleDate'] = mapped['SaleDate']
+                sale['SaleOrderDate'] = mapped['SaleDate']
         
         return sale
     
-    def build_sale_order_from_rows(self, rows: List[Dict[str, Any]], column_mapping: Dict[str, str], sale_id: str) -> Dict[str, Any]:
+    def build_sale_with_order(self, rows: List[Dict[str, Any]], column_mapping: Dict[str, str], customer_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Build a combined Cin7 Sale payload with nested Order object (single API call).
+        This combines Sale and Sale Order into one request.
+        Supports both single-row and multi-row orders.
+        
+        Args:
+            rows: List of CSV row data dictionaries (can be single or multiple rows)
+            column_mapping: Mapping of Cin7 fields to CSV columns
+            customer_data: Optional customer data for TaxRule lookup
+        
+        Returns:
+            Cin7 Sale dictionary with nested Order object containing all line items
+        """
+        # Use first row for Sale-level fields (customer, addresses, dates, etc.)
+        primary_row = rows[0] if isinstance(rows, list) and len(rows) > 0 else rows
+        
+        # Build the Sale payload (without Order) using primary row
+        sale = self.build_sale(primary_row, column_mapping)
+        
+        # Store customer data for TaxRule lookup
+        self._current_customer_data = customer_data
+        self._current_sale_data = None  # Not available yet since we haven't created the sale
+        
+        # Build the Order (Sale Order) payload
+        # Status for POST: only DRAFT and AUTHORISED are accepted
+        status = self.settings.get('default_status', 'DRAFT')
+        if status not in ['DRAFT', 'AUTHORISED']:
+            status = 'DRAFT'  # Default to DRAFT if invalid
+        
+        order = {
+            'Status': status
+        }
+        
+        # Build lines from all rows (supports multi-row orders)
+        all_lines = []
+        if isinstance(rows, list):
+            for row_data in rows:
+                row_lines = self._build_lines(row_data, column_mapping)
+                all_lines.extend(row_lines)
+        else:
+            # Single row (backward compatibility)
+            row_lines = self._build_lines(rows, column_mapping)
+            all_lines.extend(row_lines)
+        
+        if not all_lines:
+            all_lines = []
+        order['Lines'] = all_lines
+        
+        # Calculate Total from lines (sum of all line totals)
+        total = 0.0
+        for line in all_lines:
+            line_total = line.get('Total', 0)
+            total += line_total
+        
+        order['Total'] = total
+        
+        # Tax - calculate from line taxes
+        tax = 0.0
+        for line in all_lines:
+            line_tax = line.get('Tax', 0.0)
+            if isinstance(line_tax, (int, float)):
+                tax += float(line_tax)
+        
+        order['Tax'] = tax
+        
+        # Nest the Order object in the Sale
+        sale['Order'] = order
+        
+        return sale
+    
+    def build_sale_order_from_rows(self, rows: List[Dict[str, Any]], column_mapping: Dict[str, str], sale_id: str, customer_data: Optional[Dict[str, Any]] = None, sale_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Build a Cin7 Sale Order payload from multiple CSV rows (for grouped orders).
         Combines all line items from all rows into a single order.
@@ -257,6 +339,10 @@ class SalesOrderBuilder:
             'Status': status
         }
         
+        # Store customer and sale data for TaxRule lookup
+        self._current_customer_data = customer_data
+        self._current_sale_data = sale_data
+        
         # Build lines from all rows
         all_lines = []
         for row_data in rows:
@@ -266,12 +352,10 @@ class SalesOrderBuilder:
         sale_order['Lines'] = all_lines
         
         # Calculate Total from lines (sum of all line totals)
+        # Each line should already have Total calculated in _build_line
         total = 0.0
         for line in all_lines:
-            quantity = line.get('Quantity', 0)
-            price = line.get('Price', 0)
-            discount = line.get('Discount', 0)
-            line_total = (quantity * price) - discount
+            line_total = line.get('Total', 0)
             total += line_total
         
         sale_order['Total'] = total
@@ -287,7 +371,7 @@ class SalesOrderBuilder:
         
         return sale_order
     
-    def build_sale_order(self, row_data: Dict[str, Any], column_mapping: Dict[str, str], sale_id: str) -> Dict[str, Any]:
+    def build_sale_order(self, row_data: Dict[str, Any], column_mapping: Dict[str, str], sale_id: str, customer_data: Optional[Dict[str, Any]] = None, sale_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Build a Cin7 Sale Order payload from CSV row data.
         Sale Order includes: Total, Tax, and references the Sale ID.
@@ -317,6 +401,10 @@ class SalesOrderBuilder:
             'Status': status
         }
         
+        # Store customer and sale data for TaxRule lookup
+        self._current_customer_data = customer_data
+        self._current_sale_data = sale_data
+        
         # Build lines - required
         lines = self._build_lines(row_data, column_mapping)
         if not lines:
@@ -326,12 +414,10 @@ class SalesOrderBuilder:
         sale_order['Lines'] = lines
         
         # Calculate Total from lines (sum of all line totals)
+        # Each line should already have Total calculated in _build_line
         total = 0.0
         for line in lines:
-            quantity = line.get('Quantity', 0)
-            price = line.get('Price', 0)
-            discount = line.get('Discount', 0)
-            line_total = (quantity * price) - discount
+            line_total = line.get('Total', 0)
             total += line_total
         
         sale_order['Total'] = total
@@ -594,10 +680,21 @@ class SalesOrderBuilder:
                         # Tax - default to 0
                         line['Tax'] = 0.0
                         
-                        # TaxRule - pull from settings
-                        tax_rule = self.settings.get('tax_rule')
-                        if tax_rule:
-                            line['TaxRule'] = tax_rule
+                        # TaxRule - required, pull from customer, sale, or settings (in that order)
+                        tax_rule = None
+                        # 1. Try from customer data (if available)
+                        if self._current_customer_data and self._current_customer_data.get('TaxRule'):
+                            tax_rule = self._current_customer_data.get('TaxRule')
+                        # 2. Try from sale data (if available - after sale is created)
+                        elif self._current_sale_data and self._current_sale_data.get('TaxRule'):
+                            tax_rule = self._current_sale_data.get('TaxRule')
+                        # 3. Fallback to settings
+                        elif self.settings.get('tax_rule'):
+                            tax_rule = self.settings.get('tax_rule')
+                        
+                        if not tax_rule:
+                            raise ValueError("TaxRule is required but not found in customer, sale, or client credentials settings. Please set 'tax_rule' in Cin7 credentials settings or ensure customer has TaxRule configured.")
+                        line['TaxRule'] = str(tax_rule)  # TaxRule is the name (text), not a UUID
                         
                         # Add line if SKU is present (Price can be 0 or missing, we'll still show the line)
                         if line.get('SKU'):
@@ -713,17 +810,36 @@ class SalesOrderBuilder:
         else:
             line['Tax'] = 0.0
         
-        # TaxRule (required - from settings or use empty string)
-        tax_rule = self.settings.get('tax_rule')
-        line['TaxRule'] = tax_rule if tax_rule else ''
+        # TaxRule (required - pull from customer, sale, or settings in that order)
+        tax_rule = None
+        # 1. Try from customer data (if available)
+        if self._current_customer_data and self._current_customer_data.get('TaxRule'):
+            tax_rule = self._current_customer_data.get('TaxRule')
+        # 2. Try from sale data (if available - after sale is created)
+        elif self._current_sale_data and self._current_sale_data.get('TaxRule'):
+            tax_rule = self._current_sale_data.get('TaxRule')
+        # 3. Fallback to settings
+        elif self.settings.get('tax_rule'):
+            tax_rule = self.settings.get('tax_rule')
+        
+        if not tax_rule:
+            raise ValueError("TaxRule is required but not found in customer, sale, or client credentials settings. Please set 'tax_rule' in Cin7 credentials settings or ensure customer has TaxRule configured.")
+        line['TaxRule'] = str(tax_rule)  # TaxRule is the name (text), not a UUID
         
         # Discount (optional)
         discount = line_data.get('Discount') or line_data.get('discount')
+        discount_value = 0.0
         if discount:
             try:
-                line['Discount'] = float(discount)
+                discount_value = float(discount)
+                line['Discount'] = discount_value
             except (ValueError, TypeError):
                 pass
+        
+        # Total (required for validation) - calculated as Quantity * Price - Discount
+        quantity = line.get('Quantity', 0)
+        price = line.get('Price', 0)
+        line['Total'] = (quantity * price) - discount_value
         
         return line
 

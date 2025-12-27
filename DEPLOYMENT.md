@@ -22,6 +22,11 @@ Set these in Cloud Run service configuration:
 
 **Required:**
 - `DATABASE_URL` - PostgreSQL connection string
+  - **For Supabase on Cloud Run**: Use the **Transaction pooler** connection string (not Direct connection)
+  - Transaction pooler is ideal for serverless/stateless applications
+  - **Recommended: Dedicated pooler** for production (better isolation and performance)
+  - **Alternative: Shared pooler** for development/testing (lower cost)
+  - Format: `postgresql://[user]:[password]@[host]:6543/[database]` (port 6543 for transaction pooler)
 - `SECRET_KEY` - Flask secret key (generate with `python -c "import secrets; print(secrets.token_hex(32))"`)
 - `JWT_SECRET_KEY` - JWT signing key (generate with `python -c "import secrets; print(secrets.token_hex(32))"`)
 - `FLASK_ENV=production`

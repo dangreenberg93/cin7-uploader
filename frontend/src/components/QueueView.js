@@ -22,6 +22,9 @@ const QueueView = () => {
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [jsonModalOpen, setJsonModalOpen] = useState(false);
   const [viewingOrderPayload, setViewingOrderPayload] = useState(null);
+  const [apiLogs, setApiLogs] = useState([]);
+  const [loadingApiLogs, setLoadingApiLogs] = useState(false);
+  const [expandedLogIds, setExpandedLogIds] = useState(new Set());
   
   // Failed Orders tab state
   const [failedOrders, setFailedOrders] = useState([]);
@@ -51,6 +54,56 @@ const QueueView = () => {
       setLoading(false);
     }
   };
+
+  const loadApiLogs = async (orderId) => {
+    if (!orderId) {
+      console.warn('loadApiLogs called without orderId');
+      setApiLogs([]);
+      return;
+    }
+    
+    try {
+      setLoadingApiLogs(true);
+      console.log('Loading API logs for order:', orderId);
+      const response = await axios.get(`/webhooks/orders/${orderId}/api-logs`);
+      console.log('API logs response:', response.data);
+      console.log('Number of logs:', response.data.logs?.length || 0);
+      console.log('Upload ID from response:', response.data.upload_id);
+      setApiLogs(response.data.logs || []);
+    } catch (error) {
+      console.error('Failed to load API logs:', error);
+      console.error('Error response:', error.response?.data);
+      console.error('Error status:', error.response?.status);
+      setApiLogs([]);
+      // Show error in console but don't show toast
+    } finally {
+      setLoadingApiLogs(false);
+    }
+  };
+
+  // Load API logs when modal opens with an order
+  useEffect(() => {
+    if (jsonModalOpen && viewingOrderPayload) {
+      // Try different possible ID fields - check all possible locations
+      const orderId = viewingOrderPayload.id || 
+                     viewingOrderPayload.order_result_id ||
+                     (viewingOrderPayload.order_data && viewingOrderPayload.order_data.id);
+      
+      console.log('Modal opened with order payload:', viewingOrderPayload);
+      console.log('Extracted order ID:', orderId);
+      console.log('Available keys in viewingOrderPayload:', Object.keys(viewingOrderPayload || {}));
+      
+      if (orderId) {
+        loadApiLogs(orderId);
+      } else {
+        console.warn('No order ID found in viewingOrderPayload. Available keys:', Object.keys(viewingOrderPayload || {}));
+        console.warn('Full viewingOrderPayload:', JSON.stringify(viewingOrderPayload, null, 2));
+        setApiLogs([]);
+      }
+    } else {
+      setApiLogs([]);
+    }
+  }, [jsonModalOpen, viewingOrderPayload]);
 
   const loadFailedOrders = async () => {
     try {
@@ -1175,176 +1228,288 @@ const QueueView = () => {
               </div>
             )}
             
-            {/* Error Message */}
-            {viewingOrderPayload?.error_message && (
-              <div className="p-3 bg-red-50 rounded border border-red-200">
-                <div className="text-sm font-semibold text-red-800 mb-1">Error Message:</div>
-                <div className="text-sm text-red-700 break-words">
-                  {viewingOrderPayload.error_message}
-                </div>
-              </div>
-            )}
-            
-            {/* Helper function to render payload as table */}
+            {/* All Error Messages */}
             {(() => {
-              const renderPayloadTable = (payload, title, showOrderHeader = true) => {
-                if (!payload || typeof payload !== 'object') return null;
+              const errors = [];
+              
+              // Main error message
+              if (viewingOrderPayload?.error_message) {
+                errors.push({
+                  source: 'Main Error',
+                  message: viewingOrderPayload.error_message
+                });
+              }
+              
+              // Error from order_data
+              if (viewingOrderPayload?.order_data?.error_message) {
+                errors.push({
+                  source: 'Order Data Error',
+                  message: viewingOrderPayload.order_data.error_message
+                });
+              }
+              
+              // Matching details errors
+              if (viewingOrderPayload?.order_data?.matching_details) {
+                const md = viewingOrderPayload.order_data.matching_details;
                 
-                // Check if it's a sale_order_payload (has Lines array)
-                if (payload.Lines && Array.isArray(payload.Lines)) {
-                  return (
-                    <div className="space-y-4">
-                      {/* Order Details fields (non-Lines fields) - show in dev view */}
-                      {showOrderHeader && Object.keys(payload).filter(k => k !== 'Lines').length > 0 && (
-                        <div>
-                          <div className="text-sm font-semibold text-gray-700 mb-2">{title}</div>
-                          <div className="border-[0.5px] rounded-md overflow-hidden">
-                            <Table>
-                              <TableHeader>
-                                <TableRow className="bg-gray-50">
-                                  <TableHead className="w-1/3 font-semibold">Field</TableHead>
-                                  <TableHead className="font-semibold">Value</TableHead>
-                                </TableRow>
-                              </TableHeader>
-                              <TableBody>
-                                {Object.entries(payload)
-                                  .filter(([key]) => key !== 'Lines')
-                                  .map(([key, value]) => {
-                                    const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
-                                    return (
-                                      <TableRow key={key}>
-                                        <TableCell className="font-medium text-gray-700">{key}</TableCell>
-                                        <TableCell className={isPlaceholder ? 'text-orange-600 font-medium' : 'text-gray-900'}>
-                                          {isPlaceholder ? (
-                                            <span className="italic">{value}</span>
-                                          ) : (
-                                            <span>{value === null || value === undefined ? <span className="text-gray-400 italic">null</span> : String(value)}</span>
-                                          )}
-                                        </TableCell>
-                                      </TableRow>
-                                    );
-                                  })}
-                              </TableBody>
-                            </Table>
-                          </div>
+                // Customer errors
+                if (md.customer && !md.customer.found && md.customer.error) {
+                  errors.push({
+                    source: 'Customer Matching',
+                    message: md.customer.error
+                  });
+                }
+                
+                // Product errors
+                if (md.products && Array.isArray(md.products)) {
+                  md.products.forEach((product, idx) => {
+                    if (!product.found && product.error) {
+                      errors.push({
+                        source: `Product ${idx + 1} (${product.sku || 'Unknown'})`,
+                        message: product.error
+                      });
+                    }
+                  });
+                }
+                
+                // Missing fields
+                if (md.missing_fields && Array.isArray(md.missing_fields) && md.missing_fields.length > 0) {
+                  errors.push({
+                    source: 'Missing Required Fields',
+                    message: `Missing: ${md.missing_fields.join(', ')}`
+                  });
+                }
+              }
+              
+              // API response errors - check if response is an array of error objects
+              if (viewingOrderPayload?.sale_api_response) {
+                const saleResp = viewingOrderPayload.sale_api_response;
+                if (Array.isArray(saleResp)) {
+                  // Array of error objects
+                  saleResp.forEach((errorObj, idx) => {
+                    if (errorObj.ErrorCode || errorObj.Exception || errorObj.Message) {
+                      errors.push({
+                        source: `Sale API Error ${idx + 1}`,
+                        message: errorObj.Exception || errorObj.Message || `ErrorCode: ${errorObj.ErrorCode}` || 'Unknown API error',
+                        fullError: errorObj
+                      });
+                    }
+                  });
+                } else if (typeof saleResp === 'object') {
+                  // Single error object
+                  if (saleResp.Exception || saleResp.Message || saleResp.ErrorCode) {
+                    errors.push({
+                      source: 'Sale API Response',
+                      message: saleResp.Exception || saleResp.Message || saleResp.ErrorCode || 'Unknown API error',
+                      fullError: saleResp
+                    });
+                  }
+                }
+              }
+              
+              if (viewingOrderPayload?.sale_order_api_response) {
+                const soResp = viewingOrderPayload.sale_order_api_response;
+                if (Array.isArray(soResp)) {
+                  // Array of error objects
+                  soResp.forEach((errorObj, idx) => {
+                    if (errorObj.ErrorCode || errorObj.Exception || errorObj.Message) {
+                      errors.push({
+                        source: `Sale Order API Error ${idx + 1}`,
+                        message: errorObj.Exception || errorObj.Message || `ErrorCode: ${errorObj.ErrorCode}` || 'Unknown API error',
+                        fullError: errorObj
+                      });
+                    }
+                  });
+                } else if (typeof soResp === 'object') {
+                  // Single error object
+                  if (soResp.Exception || soResp.Message || soResp.ErrorCode) {
+                    errors.push({
+                      source: 'Sale Order API Response',
+                      message: soResp.Exception || soResp.Message || soResp.ErrorCode || 'Unknown API error',
+                      fullError: soResp
+                    });
+                  }
+                }
+              }
+              
+              return errors.length > 0 ? (
+                <div className="p-3 bg-red-50 rounded border border-red-200 space-y-3">
+                  <div className="text-sm font-semibold text-red-800 mb-2">All Error Messages:</div>
+                  {errors.map((error, idx) => (
+                    <div key={idx} className="text-sm text-red-700 break-words">
+                      <div className="font-medium mb-1">{error.source}:</div>
+                      <div className="ml-2">{error.message}</div>
+                      {error.fullError && (
+                        <div className="ml-2 mt-1 p-2 bg-red-100 rounded border border-red-300">
+                          <pre className="text-xs overflow-auto whitespace-pre-wrap break-words font-mono">
+                            {JSON.stringify(error.fullError, null, 2)}
+                          </pre>
                         </div>
                       )}
-                      
-                      {/* Line Items */}
-                      <div>
-                        <div className="text-sm font-semibold text-gray-700 mb-2">{title}</div>
-                        {payload.Lines.length > 0 ? (
-                          <div className="border rounded-md overflow-hidden">
-                            <div className="overflow-x-auto">
-                              <Table>
-                                <TableHeader>
-                                  <TableRow className="bg-gray-50">
-                                    <TableHead className="font-semibold">Product</TableHead>
-                                    <TableHead className="font-semibold">SKU</TableHead>
-                                    <TableHead className="font-semibold text-right">Quantity</TableHead>
-                                    <TableHead className="font-semibold text-right">Price</TableHead>
-                                    <TableHead className="font-semibold text-right">Total</TableHead>
-                                    <TableHead className="font-semibold">Product ID</TableHead>
-                                  </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                  {payload.Lines.map((line, idx) => {
-                                    const hasPlaceholder = line.ProductID && String(line.ProductID).includes('<REQUIRED:');
-                                    return (
-                                      <TableRow key={idx}>
-                                        <TableCell className="font-medium">{line.Product || '-'}</TableCell>
-                                        <TableCell className="font-mono text-xs">{line.SKU || '-'}</TableCell>
-                                        <TableCell className="text-right">{line.Quantity ?? '-'}</TableCell>
-                                        <TableCell className="text-right">{line.Price !== undefined ? `$${Number(line.Price).toFixed(2)}` : '-'}</TableCell>
-                                        <TableCell className="text-right">
-                                          {line.Quantity !== undefined && line.Price !== undefined 
-                                            ? `$${(Number(line.Quantity) * Number(line.Price)).toFixed(2)}` 
-                                            : '-'}
-                                        </TableCell>
-                                        <TableCell className={hasPlaceholder ? 'text-orange-600 font-medium italic' : 'font-mono text-xs'}>
-                                          {line.ProductID || '-'}
-                                        </TableCell>
-                                      </TableRow>
-                                    );
-                                  })}
-                                </TableBody>
-                              </Table>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="p-4 bg-gray-50 rounded border border-gray-200 text-sm text-gray-500 text-center">
-                            No line items in this payload
-                          </div>
-                        )}
+                    </div>
+                  ))}
+                </div>
+              ) : null;
+            })()}
+            
+            {/* Helper function to render payload as JSON */}
+            {(() => {
+              const renderPayloadJson = (payload, title) => {
+                if (!payload || typeof payload !== 'object') return null;
+                
+                return (
+                  <div className="space-y-2">
+                    {title && <div className="text-sm font-semibold text-gray-700">{title}</div>}
+                    <div className="border rounded-md overflow-hidden">
+                      <div className="p-4 bg-gray-50">
+                        <pre className="text-xs overflow-auto max-h-96 whitespace-pre-wrap break-words font-mono">
+                          {JSON.stringify(payload, null, 2)}
+                        </pre>
                       </div>
                     </div>
-                  );
-                } else {
-                  // Regular payload (sale_payload - order header only)
-                  return (
-                    <div>
-                      <div className="text-sm font-semibold text-gray-700 mb-2">{title}</div>
-                      <div className="border-[0.5px] rounded-md overflow-hidden">
-                        <Table>
-                          <TableHeader>
-                            <TableRow className="bg-gray-50">
-                              <TableHead className="w-1/3 font-semibold">Field</TableHead>
-                              <TableHead className="font-semibold">Value</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {Object.entries(payload).map(([key, value]) => {
-                              const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
-                              return (
-                                <TableRow key={key}>
-                                  <TableCell className="font-medium text-gray-700">{key}</TableCell>
-                                  <TableCell className={isPlaceholder ? 'text-orange-600 font-medium' : 'text-gray-900'}>
-                                    {isPlaceholder ? (
-                                      <span className="italic">{value}</span>
-                                    ) : (
-                                      <span>{value === null || value === undefined ? <span className="text-gray-400 italic">null</span> : String(value)}</span>
-                                    )}
-                                  </TableCell>
-                                </TableRow>
-                              );
-                            })}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    </div>
-                  );
-                }
+                  </div>
+                );
+              };
+              
+              const renderApiCall = (requestPayload, responsePayload, title) => {
+                if (!requestPayload && !responsePayload) return null;
+                
+                return (
+                  <div className="space-y-4 border-b pb-6 last:border-b-0 last:pb-0">
+                    <div className="text-base font-semibold text-gray-800 border-b pb-2">{title}</div>
+                    
+                    {/* Request Payload */}
+                    {requestPayload && (
+                      renderPayloadJson(requestPayload, "Request (Sent to Cin7)")
+                    )}
+                    
+                    {/* Response Payload */}
+                    {responsePayload && (
+                      renderPayloadJson(responsePayload, "Response (From Cin7)")
+                    )}
+                    
+                    {!responsePayload && requestPayload && (
+                      <div className="text-sm text-gray-500 italic">No response data available</div>
+                    )}
+                  </div>
+                );
               };
               
               return (
                 <>
-                  {/* Prepared/Sent Payloads */}
-                  {(viewingOrderPayload?.sale_payload || viewingOrderPayload?.sale_order_payload) && (
-                    <div className="space-y-4">
-                      <div className="text-base font-semibold text-gray-800 border-b pb-2">Prepared/Sent Payloads</div>
-                      {viewingOrderPayload.sale_payload && renderPayloadTable(viewingOrderPayload.sale_payload, "Part 1: Order Details", true)}
-                      {viewingOrderPayload.sale_order_payload && renderPayloadTable(viewingOrderPayload.sale_order_payload, "Part 2: Line Items", true)}
+                  {/* API Logs from Database - Primary source of truth */}
+                  <div className="space-y-4">
+                    <div className="text-base font-semibold text-gray-800 border-b pb-2">
+                      API Calls (from Database)
+                      {loadingApiLogs && <span className="text-sm text-gray-500 ml-2">(Loading...)</span>}
                     </div>
-                  )}
-                  
-                  {/* What's Needed Payloads */}
-                  {viewingOrderPayload?.what_is_needed && (
-                    <div className="space-y-4">
-                      <div className="text-base font-semibold text-gray-800 border-b pb-2">Complete Payloads Needed</div>
-                      {viewingOrderPayload.what_is_needed._sale_payload && renderPayloadTable(viewingOrderPayload.what_is_needed._sale_payload, "Part 1: Order Details", true)}
-                      {viewingOrderPayload.what_is_needed._sale_order_payload && renderPayloadTable(viewingOrderPayload.what_is_needed._sale_order_payload, "Part 2: Line Items", true)}
-                      {viewingOrderPayload.what_is_needed._notes && viewingOrderPayload.what_is_needed._notes.length > 0 && (
-                        <div className="mt-4 pt-4 border-t border-gray-200">
-                          <div className="text-sm font-semibold text-gray-700 mb-2">Action Items:</div>
-                          <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-                            {viewingOrderPayload.what_is_needed._notes.map((note, idx) => (
-                              <li key={idx}>{note}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                    {loadingApiLogs ? (
+                      <div className="text-sm text-gray-500">Loading API logs...</div>
+                    ) : apiLogs.length > 0 ? (
+                      <div className="space-y-2">
+                        {apiLogs.map((log, idx) => {
+                          const logId = log.id || `log-${idx}`;
+                          const isExpanded = expandedLogIds.has(logId);
+                          
+                          return (
+                            <div key={logId} className="border rounded-md overflow-hidden">
+                              <div 
+                                className="bg-gray-100 p-3 border-b cursor-pointer hover:bg-gray-200 transition-colors"
+                                onClick={() => {
+                                  const newExpanded = new Set(expandedLogIds);
+                                  if (isExpanded) {
+                                    newExpanded.delete(logId);
+                                  } else {
+                                    newExpanded.add(logId);
+                                  }
+                                  setExpandedLogIds(newExpanded);
+                                }}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    {isExpanded ? (
+                                      <ChevronDown className="h-4 w-4 text-gray-600" />
+                                    ) : (
+                                      <ChevronRight className="h-4 w-4 text-gray-600" />
+                                    )}
+                                    <span className="font-semibold text-sm">{log.method}</span>
+                                    <span className="text-xs text-gray-600">{log.endpoint}</span>
+                                    {log.trigger && (
+                                      <Badge variant="outline" className="text-xs">{log.trigger}</Badge>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    {log.response_status && (
+                                      <Badge 
+                                        variant={log.response_status >= 400 ? "destructive" : "default"}
+                                        className="text-xs"
+                                      >
+                                        {log.response_status}
+                                      </Badge>
+                                    )}
+                                    {log.duration_ms && (
+                                      <span className="text-xs text-gray-500">{log.duration_ms}ms</span>
+                                    )}
+                                    {log.created_at && (
+                                      <span className="text-xs text-gray-500">
+                                        {new Date(log.created_at).toLocaleTimeString()}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                              {isExpanded && (
+                                <div className="p-4 space-y-3">
+                                  {/* Request */}
+                                  {log.request_body && (
+                                    <div>
+                                      <div className="text-sm font-semibold text-gray-700 mb-2">Request (Sent to Cin7):</div>
+                                      {renderPayloadJson(log.request_body, null)}
+                                    </div>
+                                  )}
+                                  
+                                  {/* Response */}
+                                  {log.response_body && (
+                                    <div>
+                                      <div className="text-sm font-semibold text-gray-700 mb-2">Response (From Cin7):</div>
+                                      {renderPayloadJson(log.response_body, null)}
+                                    </div>
+                                  )}
+                                  
+                                  {/* Error Message */}
+                                  {log.error_message && (
+                                    <div className="p-2 bg-red-50 rounded border border-red-200">
+                                      <div className="text-sm font-semibold text-red-800 mb-1">Error:</div>
+                                      <div className="text-sm text-red-700 break-words">{log.error_message}</div>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Request URL */}
+                                  {log.request_url && (
+                                    <div className="text-xs text-gray-500 break-all">
+                                      <span className="font-semibold">URL:</span> {log.request_url}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-gray-500 italic">
+                        No API logs found for this order
+                        {viewingOrderPayload?.id && (
+                          <span className="ml-2">(Order ID: {viewingOrderPayload.id})</span>
+                        )}
+                        {!loadingApiLogs && (
+                          <div className="mt-2 text-xs text-gray-400">
+                            Check browser console for debug information
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </>
               );
             })()}

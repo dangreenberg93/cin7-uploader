@@ -370,8 +370,39 @@ def process_single_order(
     order_data['order_number'] = primary_row.get('SaleOrderNumber') or primary_row.get('order_number', '') or order_data.get('saleordernumber', '')
     
     try:
-        # Step 1: Build and create Sale
-        sale_data = builder.build_sale(primary_row, column_mapping)
+        # Always use combined approach (single API call with nested Order)
+        use_combined_approach = True
+        
+        # Check customer lookup first (needed for TaxRule in combined call)
+        customer_name = primary_row.get('CustomerName') or primary_row.get('customer_name') or ''
+        customer_data = None
+        
+        # Collect detailed matching information before API call
+        matching_details = {
+            'customer': {},
+            'products': [],
+            'missing_fields': []
+        }
+        
+        if customer_name:
+            customer_data = builder._lookup_customer_by_name(customer_name)
+            if customer_data:
+                matching_details['customer'] = {
+                    'name': customer_name,
+                    'found': True,
+                    'cin7_id': customer_data.get('ID'),
+                    'cin7_name': customer_data.get('Name'),
+                    'tax_rule': customer_data.get('TaxRule')  # Store TaxRule for later use
+                }
+            else:
+                matching_details['customer'] = {
+                    'name': customer_name,
+                    'found': False,
+                    'error': f'Customer "{customer_name}" not found in Cin7'
+                }
+        
+        # Build Sale with nested Order (combined approach for all orders)
+        sale_data = builder.build_sale_with_order(order_rows, column_mapping, customer_data=customer_data)
         
         # Get sale type value for "what's needed" payload
         sale_type_setting = settings.get('sale_type', '')
@@ -382,31 +413,6 @@ def process_single_order(
             sale_type_value = 'Simple Sale'
         else:
             sale_type_value = 'Simple Sale'
-        
-        # Collect detailed matching information before API call
-        matching_details = {
-            'customer': {},
-            'products': [],
-            'missing_fields': []
-        }
-        
-        # Check customer lookup
-        customer_name = primary_row.get('CustomerName') or primary_row.get('customer_name') or sale_data.get('Customer', '')
-        if customer_name:
-            customer_data = builder._lookup_customer_by_name(customer_name)
-            if customer_data:
-                matching_details['customer'] = {
-                    'name': customer_name,
-                    'found': True,
-                    'cin7_id': customer_data.get('ID'),
-                    'cin7_name': customer_data.get('Name')
-                }
-            else:
-                matching_details['customer'] = {
-                    'name': customer_name,
-                    'found': False,
-                    'error': f'Customer "{customer_name}" not found in Cin7'
-                }
         
         # Check product lookups for all rows
         sku_col = column_mapping.get('SKU') or column_mapping.get('ProductCode')
@@ -458,19 +464,14 @@ def process_single_order(
         if 'Type' in missing_required:
             what_is_needed['Type'] = sale_type_value  # Use the determined type
         
-        # Build Sale Order payload (step 2) to show what would be needed
-        sale_order_data = None
-        if len(order_rows) > 1:
-            # Multiple rows - use grouped rows
-            row_data_list = order_rows
-            sale_order_data = builder.build_sale_order_from_rows(row_data_list, column_mapping, '<SALE_ID_PLACEHOLDER>')
-        else:
-            # Single row order
-            sale_order_data = builder.build_sale_order(primary_row, column_mapping, '<SALE_ID_PLACEHOLDER>')
+        # Build combined Sale with Order payload to show what would be needed
+        # This matches what we'll actually send (combined approach)
+        combined_payload_for_what_is_needed = builder.build_sale_with_order(order_rows, column_mapping, customer_data=customer_data)
         
         # Debug: Log if lines are empty
-        if sale_order_data and (not sale_order_data.get('Lines') or len(sale_order_data.get('Lines', [])) == 0):
-            logger.warning(f"Warning: Sale Order payload has no lines for order {order_key}. Column mapping has SKU: {'SKU' in column_mapping}, Price: {'Price' in column_mapping}, Quantity: {'Quantity' in column_mapping}")
+        order_obj = combined_payload_for_what_is_needed.get('Order', {})
+        if not order_obj.get('Lines') or len(order_obj.get('Lines', [])) == 0:
+            logger.warning(f"Warning: Combined payload has no lines for order {order_key}. Column mapping has SKU: {'SKU' in column_mapping}, Price: {'Price' in column_mapping}, Quantity: {'Quantity' in column_mapping}")
             logger.warning(f"Primary row keys: {list(primary_row.keys())[:10]}...")  # Log first 10 keys
         
         # Add notes about what needs to be fixed
@@ -482,11 +483,10 @@ def process_single_order(
             for p in missing_products:
                 what_is_needed['_notes'].append(f"Product SKU '{p.get('sku')}' needs to be created in Cin7 first, or SKU corrected")
         
-        # Store both Sale and Sale Order payloads in what_is_needed
-        # Remove internal fields from what_is_needed before storing sale payload
+        # Store the combined payload (what we'll actually send)
+        # Remove internal fields from what_is_needed before storing
         what_is_needed_clean = {k: v for k, v in what_is_needed.items() if not k.startswith('_')}
-        what_is_needed['_sale_payload'] = what_is_needed_clean  # Store sale payload separately
-        what_is_needed['_sale_order_payload'] = sale_order_data  # Store sale order payload with line items
+        what_is_needed['_combined_payload'] = combined_payload_for_what_is_needed  # Store the complete combined payload
         
         # Check if we should even attempt to send to Cin7
         # CustomerID is required - if we don't have it, don't send
@@ -504,8 +504,7 @@ def process_single_order(
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
-                'sale_payload': sale_data,  # Store what we would have sent
-                'sale_order_payload': sale_order_data,  # Store what we would have sent
+                'sale_payload': sale_data,  # Store what we would have sent (combined payload)
                 'what_is_needed': what_is_needed,  # Store what's needed
                 'attempted_send': False  # Flag to indicate we didn't actually send
             }
@@ -518,8 +517,28 @@ def process_single_order(
                 'matching_details': matching_details
             }
         
-        # Create Sale via API (only if we have CustomerID)
+        # Create Sale with nested Order via API (single call for all orders)
+        logger.info(f"Creating Sale with nested Order (combined) for order {order_key}...")
         success, message, response = api_client.create_sale(sale_data)
+        sale_api_response = response if response else None
+        sale_order_api_response = None  # Combined in same response
+        
+        # Extract both Sale ID and Sale Order ID from response
+        sale_id = None
+        sale_order_id = None
+        if isinstance(response, dict):
+            sale_id = response.get('ID')
+            # Check if Order is in response
+            order_data = response.get('Order')
+            if order_data:
+                sale_order_id = order_data.get('ID')
+        elif isinstance(response, list) and len(response) > 0:
+            first_item = response[0] if isinstance(response[0], dict) else None
+            if first_item:
+                sale_id = first_item.get('ID')
+                order_data = first_item.get('Order')
+                if order_data:
+                    sale_order_id = order_data.get('ID')
         
         if not success:
             # Enhance error message with matching details
@@ -544,8 +563,8 @@ def process_single_order(
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
-                'sale_payload': sale_data,  # Store the payload that was attempted
-                'sale_order_payload': sale_order_data,  # Store the sale order payload that was attempted
+                'sale_payload': sale_data,  # Store the combined payload that was attempted
+                'sale_api_response': sale_api_response,  # Store the API response
                 'what_is_needed': what_is_needed,  # Store what the complete payload should look like
                 'attempted_send': True  # Flag to indicate we did attempt to send
             }
@@ -558,104 +577,147 @@ def process_single_order(
                 'matching_details': matching_details
             }
         
-        # Extract Sale ID from response
-        sale_id = None
-        if isinstance(response, dict):
-            sale_id = response.get('ID')
-        elif isinstance(response, list) and len(response) > 0:
-            sale_id = response[0].get('ID') if isinstance(response[0], dict) else None
-        
+        # Handle response - Sale and Order created in one call
         if not sale_id:
             order_result.status = 'failed'
-            order_result.error_message = 'Sale created but no ID returned'
-            order_result.error_type = categorize_error('Sale created but no ID returned')
+            order_result.error_message = 'Sale with Order created but no Sale ID returned'
+            order_result.error_type = categorize_error('Sale with Order created but no Sale ID returned')
             order_result.order_data = order_data
             order_result.processed_at = datetime.utcnow()
             db.session.commit()
             return {
                 'status': 'failed',
-                'error_message': 'Sale created but no ID returned',
+                'error_message': 'Sale with Order created but no Sale ID returned',
                 'order_data': order_data
             }
         
-        # Rate limiting delay between Sale and Sale Order
-        delay = settings.get('default_delay_between_orders', 0.7)
-        time.sleep(delay)
+        # Success - both Sale and Order were created
+        order_result.status = 'success'
+        order_result.sale_id = sale_id
+        order_result.sale_order_id = sale_order_id if sale_order_id else None
+        order_result.order_data = {
+            **order_data,
+            'matching_details': matching_details,
+            'sale_payload': sale_data,  # Store the combined payload that was sent
+            'sale_api_response': sale_api_response,  # Store the API response (contains both Sale and Order)
+            'sale_order_api_response': sale_order_api_response  # Same response for combined approach
+        }
+        order_result.processed_at = datetime.utcnow()
+        db.session.commit()
         
-        # Step 2: Build and create Sale Order
-        # Note: sale_order_data was already built above for "what_is_needed", but rebuild with actual sale_id
-        logger.info(f"Step 2: Building Sale Order for order {order_key} with sale_id {sale_id}")
-        if len(order_rows) > 1:
-            # Multiple rows - use grouped rows
+        return {
+            'status': 'success',
+            'sale_id': str(sale_id),
+            'sale_order_id': str(sale_order_id) if sale_order_id else None,
+            'order_data': order_result.order_data
+        }
+    
+    except Exception as e:
+            if not sale_id:
+                order_result.status = 'failed'
+                order_result.error_message = 'Sale created but no ID returned'
+                order_result.error_type = categorize_error('Sale created but no ID returned')
+                order_result.order_data = order_data
+                order_result.processed_at = datetime.utcnow()
+                db.session.commit()
+                return {
+                    'status': 'failed',
+                    'error_message': 'Sale created but no ID returned',
+                    'order_data': order_data
+                }
+            
+            # Rate limiting delay between Sale and Sale Order
+            delay = settings.get('default_delay_between_orders', 0.7)
+            time.sleep(delay)
+            
+            # Get Sale data to extract TaxRule (if available)
+            sale_data_from_api = None
+            if api_client:
+                try:
+                    sale_data_from_api = api_client.get_sale(str(sale_id))
+                    if sale_data_from_api:
+                        logger.info(f"Retrieved Sale data for TaxRule lookup - TaxRule: {sale_data_from_api.get('TaxRule')}")
+                except Exception as sale_lookup_error:
+                    logger.warning(f"Could not retrieve Sale data for TaxRule lookup: {str(sale_lookup_error)}")
+            
+            # Step 2: Build and create Sale Order
+            # Note: sale_order_data was already built above for "what_is_needed", but rebuild with actual sale_id
+            # Pass customer_data and sale_data so builder can extract TaxRule
+            logger.info(f"Step 2: Building Sale Order for order {order_key} with sale_id {sale_id}")
             row_data_list = order_rows
-            sale_order_data = builder.build_sale_order_from_rows(row_data_list, column_mapping, str(sale_id))
-        else:
-            # Single row order
-            sale_order_data = builder.build_sale_order(primary_row, column_mapping, str(sale_id))
-        
-        logger.info(f"Sale Order payload built for order {order_key}: SaleID={sale_order_data.get('SaleID')}, Lines count={len(sale_order_data.get('Lines', []))}, Total={sale_order_data.get('Total')}")
-        
-        # Create Sale Order via API
-        logger.info(f"Creating Sale Order via API for order {order_key}...")
-        so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
-        logger.info(f"Sale Order API call result for order {order_key}: success={so_success}, message={so_message}")
-        logger.info(f"Sale Order response type: {type(so_response)}, response: {so_response}")
-        
-        if so_success:
-            sale_order_id = None
-            if isinstance(so_response, dict):
-                # Try multiple possible ID fields
-                sale_order_id = (so_response.get('ID') or 
-                               so_response.get('SaleOrderID') or 
-                               so_response.get('SaleOrder') or
-                               so_response.get('id'))
-                logger.info(f"Extracted sale_order_id from dict: {sale_order_id}, response keys: {list(so_response.keys()) if isinstance(so_response, dict) else 'N/A'}")
-            elif isinstance(so_response, list) and len(so_response) > 0:
-                first_item = so_response[0]
-                if isinstance(first_item, dict):
-                    sale_order_id = (first_item.get('ID') or 
-                                   first_item.get('SaleOrderID') or 
-                                   first_item.get('SaleOrder') or
-                                   first_item.get('id'))
-                logger.info(f"Extracted sale_order_id from list: {sale_order_id}")
+            sale_order_data = builder.build_sale_order_from_rows(row_data_list, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_api)
             
-            # If we still don't have an ID, log warning but don't fail - Sale Order might have been created
-            if not sale_order_id:
-                logger.warning(f"Sale Order created successfully but no ID found in response for order {order_key}. Response: {so_response}")
-                # Still mark as success since the API call succeeded - the Sale Order was likely created
-                # The ID might be in the response but in an unexpected format
+            logger.info(f"Sale Order payload built for order {order_key}: SaleID={sale_order_data.get('SaleID')}, Lines count={len(sale_order_data.get('Lines', []))}, Total={sale_order_data.get('Total')}")
             
-            order_result.status = 'success'
-            order_result.sale_id = sale_id
-            order_result.sale_order_id = sale_order_id if sale_order_id else None
-            # Store sale_payload for successful orders too (for reference)
-            order_result.order_data = {
-                **order_data,
-                'matching_details': matching_details,
-                'sale_payload': sale_data  # Store the payload that was sent
-            }
-            order_result.processed_at = datetime.utcnow()
-            db.session.commit()
+            # Create Sale Order via API
+            logger.info(f"Creating Sale Order via API for order {order_key}...")
+            so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
+            logger.info(f"Sale Order API call result for order {order_key}: success={so_success}, message={so_message}")
+            logger.info(f"Sale Order response type: {type(so_response)}, response: {so_response}")
             
-            return {
-                'status': 'success',
-                'sale_id': str(sale_id),
-                'sale_order_id': str(sale_order_id) if sale_order_id else None,
-                'order_data': order_result.order_data
-            }
-        else:
-            # Sale was created but Sale Order failed
-            error_msg = f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}'
+            # Store API responses for display
+            sale_order_api_response = so_response if so_response else None
+            
+            if so_success:
+                sale_order_id = None
+                if isinstance(so_response, dict):
+                    # Try multiple possible ID fields
+                    sale_order_id = (so_response.get('ID') or 
+                                   so_response.get('SaleOrderID') or 
+                                   so_response.get('SaleOrder') or
+                                   so_response.get('id'))
+                    logger.info(f"Extracted sale_order_id from dict: {sale_order_id}, response keys: {list(so_response.keys()) if isinstance(so_response, dict) else 'N/A'}")
+                elif isinstance(so_response, list) and len(so_response) > 0:
+                    first_item = so_response[0]
+                    if isinstance(first_item, dict):
+                        sale_order_id = (first_item.get('ID') or 
+                                       first_item.get('SaleOrderID') or 
+                                       first_item.get('SaleOrder') or
+                                       first_item.get('id'))
+                    logger.info(f"Extracted sale_order_id from list: {sale_order_id}")
+                
+                # If we still don't have an ID, log warning but don't fail - Sale Order might have been created
+                if not sale_order_id:
+                    logger.warning(f"Sale Order created successfully but no ID found in response for order {order_key}. Response: {so_response}")
+                    # Still mark as success since the API call succeeded - the Sale Order was likely created
+                    # The ID might be in the response but in an unexpected format
+                
+                order_result.status = 'success'
+                order_result.sale_id = sale_id
+                order_result.sale_order_id = sale_order_id if sale_order_id else None
+                # Store sale_payload and API responses for successful orders too (for reference)
+                order_result.order_data = {
+                    **order_data,
+                    'matching_details': matching_details,
+                    'sale_payload': sale_data,  # Store the payload that was sent
+                    'sale_api_response': sale_api_response,  # Store the API response
+                    'sale_order_payload': sale_order_data,  # Store the sale order payload that was sent
+                    'sale_order_api_response': sale_order_api_response  # Store the API response
+                }
+                order_result.processed_at = datetime.utcnow()
+                db.session.commit()
+                
+                return {
+                    'status': 'success',
+                    'sale_id': str(sale_id),
+                    'sale_order_id': str(sale_order_id) if sale_order_id else None,
+                    'order_data': order_result.order_data
+                }
+            else:
+                # Sale was created but Sale Order failed
+                error_msg = f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}'
             order_result.status = 'failed'
             order_result.sale_id = sale_id
             order_result.error_message = error_msg
             order_result.error_type = categorize_error(error_msg)
-            # Store sale_payload, sale_order_payload and matching details for reference
+            # Store sale_payload, sale_order_payload, API responses and matching details for reference
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
                 'sale_payload': sale_data,  # Store the payload that was sent
-                'sale_order_payload': sale_order_data  # Store the sale order payload that was sent
+                'sale_api_response': sale_api_response,  # Store the API response
+                'sale_order_payload': sale_order_data,  # Store the sale order payload that was sent
+                'sale_order_api_response': sale_order_api_response  # Store the API response (even if failed)
             }
             order_result.processed_at = datetime.utcnow()
             db.session.commit()
@@ -931,9 +993,12 @@ def process_webhook_csv(
     validator = SalesOrderValidator(api_client)
     row_groups = validator._group_rows_by_order(rows, column_mapping)
     
-    # Preload customers and products for better performance and to ensure ProductID is available
+    # Preload customers and products from database cache for better performance
     try:
-        customer_count, product_count = validator.preload_customers_and_products()
+        customer_count, product_count = validator.preload_customers_and_products(
+            db_session=db.session,
+            client_erp_credentials_id=client_erp_credentials_id
+        )
         logger.info(f"Preloaded {customer_count} customers and {product_count} products for webhook processing")
     except Exception as e:
         logger.warning(f"Warning: Failed to preload customers/products: {str(e)}")
@@ -1356,10 +1421,13 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
             logger_callback=lambda **kwargs: None  # Disable logging for retry
         )
         
-        # Preload customers and products for better performance
+        # Preload customers and products from database cache for better performance
         validator_for_preload = SalesOrderValidator(api_client)
         try:
-            customer_count, product_count = validator_for_preload.preload_customers_and_products()
+            customer_count, product_count = validator_for_preload.preload_customers_and_products(
+                db_session=db.session,
+                client_erp_credentials_id=client_erp_credentials_id
+            )
             logger.info(f"Preloaded {customer_count} customers and {product_count} products for retry")
         except Exception as e:
             logger.warning(f"Warning: Failed to preload customers/products: {str(e)}")
@@ -1411,6 +1479,93 @@ def _retry_order_internal(order_result: SalesOrderResult) -> Tuple[Dict, Optiona
     except Exception as e:
         logger.error(f"Error retrying order {order_result.id}: {str(e)}", exc_info=True)
         return None, f'Internal server error: {str(e)}'
+
+
+@webhooks_bp.route('/orders/<order_result_id>/api-logs', methods=['GET'])
+@jwt_required()
+def get_order_api_logs(order_result_id):
+    """Get all API logs associated with a specific order result"""
+    try:
+        # Get user ID from JWT token
+        user_identity = get_jwt_identity()
+        if not user_identity:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        # Get the order result
+        try:
+            order_result_uuid = uuid.UUID(order_result_id)
+        except (ValueError, AttributeError):
+            return jsonify({'error': 'Invalid order result ID format'}), 400
+        
+        order_result = SalesOrderResult.query.get(order_result_uuid)
+        if not order_result:
+            return jsonify({'error': 'Order result not found'}), 404
+        
+        # Get the upload to find API logs
+        upload = SalesOrderUpload.query.get(order_result.upload_id)
+        if not upload:
+            return jsonify({'error': 'Upload not found'}), 404
+        
+        # Get all API logs for this upload
+        # Get all logs for the upload - they're all related to processing orders from this upload
+        logger.info(f"Fetching API logs for order {order_result_id}, upload_id: {order_result.upload_id}")
+        logs_query = Cin7ApiLog.query.filter_by(upload_id=order_result.upload_id)
+        
+        # Order by creation time (oldest first to see the sequence)
+        logs_query = logs_query.order_by(Cin7ApiLog.created_at.asc())
+        
+        logs = logs_query.all()
+        logger.info(f"Found {len(logs)} API logs for upload_id {order_result.upload_id}")
+        
+        # Format response
+        logs_data = []
+        for log in logs:
+            # Parse response_body if it's a string (JSON stored as text)
+            response_body = log.response_body
+            if isinstance(response_body, str):
+                try:
+                    import json
+                    response_body = json.loads(response_body)
+                except (json.JSONDecodeError, TypeError):
+                    # Keep as string if not valid JSON
+                    pass
+            
+            # Parse request_body if it's a string
+            request_body = log.request_body
+            if isinstance(request_body, str):
+                try:
+                    import json
+                    request_body = json.loads(request_body)
+                except (json.JSONDecodeError, TypeError):
+                    # Keep as string if not valid JSON
+                    pass
+            
+            logs_data.append({
+                'id': str(log.id),
+                'endpoint': log.endpoint,
+                'method': log.method,
+                'request_url': log.request_url,
+                'request_headers': log.request_headers,
+                'request_body': request_body,
+                'response_status': log.response_status,
+                'response_body': response_body,
+                'error_message': log.error_message,
+                'duration_ms': log.duration_ms,
+                'trigger': log.trigger,
+                'created_at': log.created_at.isoformat() if log.created_at else None
+            })
+        
+        logger.info(f"Returning {len(logs_data)} API logs for order {order_result_id}")
+        return jsonify({
+            'logs': logs_data,
+            'total': len(logs_data),
+            'upload_id': str(order_result.upload_id),
+            'order_id': str(order_result.id)
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error fetching API logs for order {order_result_id}: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
 @webhooks_bp.route('/retry/<order_result_id>', methods=['POST'])

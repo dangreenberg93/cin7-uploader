@@ -361,6 +361,82 @@ class Cin7SalesAPI:
                 )
             return None
     
+    def get_sale(self, sale_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a sale record by ID.
+        
+        Args:
+            sale_id: The unique identifier (ID) of the sale
+        
+        Returns:
+            Sale data or None if not found
+        """
+        self._rate_limit()
+        url = f"{self.base_url}/sale"
+        endpoint = "/sale"
+        method = "GET"
+        params = {"id": sale_id}
+        start_time = time.time()
+        
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            # Log the API call
+            response_body = None
+            error_message = None
+            try:
+                response_body = response.json() if response.content else None
+            except:
+                response_body = response.text[:1000] if response.text else None
+            
+            if response.status_code != 200:
+                error_message = f"HTTP {response.status_code}: {response.text[:200] if response.text else 'Unknown error'}"
+            
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=f"{url}?{self._build_query_string(params)}",
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=response.status_code,
+                    response_body=response_body,
+                    error_message=error_message,
+                    duration_ms=duration_ms
+                )
+            
+            if response.status_code == 200:
+                data = response_body if response_body else {}
+                # Sale endpoint can return SaleList array or a single Sale object
+                if isinstance(data, list) and len(data) > 0:
+                    return data[0]
+                elif data.get("SaleList") and len(data["SaleList"]) > 0:
+                    return data["SaleList"][0]
+                elif data.get("ID"):  # Single sale object
+                    return data
+            return None
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=f"{url}?{self._build_query_string(params)}",
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return None
+    
     def search_customer(self, email: Optional[str] = None, name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Search for customers by email or name.

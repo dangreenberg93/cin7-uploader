@@ -2,7 +2,7 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 import logging
-from database import db, Client, ClientCin7Credentials, ClientSettings, ClientCsvMapping, SalesOrderUpload, UserClient, Cin7ApiLog
+from database import db, Client, ClientCin7Credentials, ClientSettings, ClientCsvMapping, SalesOrderUpload, UserClient, Cin7ApiLog, CachedCustomer, CachedProduct
 from cin7_sales.api_client import Cin7SalesAPI
 from cin7_sales.csv_parser import CSVParser
 from cin7_sales.validator import SalesOrderValidator
@@ -518,10 +518,13 @@ def validate_data():
             'session_keys': list(session.keys()) if session else []
         }), 400
     
-    # Preload latest customers and products from Cin7
+    # Preload latest customers and products from database cache
     logger.info("DEBUG: About to call preload_customers_and_products()")
     try:
-        customer_count, product_count = validator.preload_customers_and_products()
+        customer_count, product_count = validator.preload_customers_and_products(
+            db_session=db.session,
+            client_erp_credentials_id=cred_row.id
+        )
         logger.info(f"Preloaded {customer_count} customers and {product_count} products for validation")
         logger.info(f"DEBUG: preload completed successfully - this should have created API logs")
     except Exception as e:
@@ -613,11 +616,68 @@ def refresh_cache():
             base_url='https://inventory.dearsystems.com/ExternalApi/v2/'
         )
         
-        # Create validator and preload data (this fetches fresh data from Cin7)
-        validator = SalesOrderValidator(api_client)
-        logger.info("Refreshing customer and product cache...")
-        customer_count, product_count = validator.preload_customers_and_products()
-        logger.info(f"Cache refreshed: {customer_count} customers, {product_count} products")
+        # Fetch fresh data from Cin7
+        logger.info("Refreshing customer and product cache from Cin7 API...")
+        customers = api_client.get_all_customers()
+        products = api_client.get_all_products()
+        
+        customer_count = len(customers)
+        product_count = len(products)
+        
+        # Store customers in database cache
+        logger.info(f"Storing {customer_count} customers in database cache...")
+        for customer in customers:
+            customer_id = customer.get('ID')
+            if not customer_id:
+                continue
+            
+            # Use upsert: update if exists, insert if not
+            cached_customer = CachedCustomer.query.filter_by(
+                client_erp_credentials_id=cred_row.id,
+                cin7_customer_id=customer_id
+            ).first()
+            
+            if cached_customer:
+                cached_customer.customer_data = customer
+                cached_customer.updated_at = datetime.utcnow()
+            else:
+                cached_customer = CachedCustomer(
+                    client_erp_credentials_id=cred_row.id,
+                    cin7_customer_id=customer_id,
+                    customer_data=customer
+                )
+                db.session.add(cached_customer)
+        
+        # Store products in database cache
+        logger.info(f"Storing {product_count} products in database cache...")
+        for product in products:
+            product_id = product.get('ID')
+            sku = product.get('SKU')
+            if not product_id or not sku:
+                continue
+            
+            # Use upsert: update if exists, insert if not
+            cached_product = CachedProduct.query.filter_by(
+                client_erp_credentials_id=cred_row.id,
+                sku=sku.strip()
+            ).first()
+            
+            if cached_product:
+                cached_product.cin7_product_id = product_id
+                cached_product.product_data = product
+                cached_product.updated_at = datetime.utcnow()
+            else:
+                cached_product = CachedProduct(
+                    client_erp_credentials_id=cred_row.id,
+                    cin7_product_id=product_id,
+                    sku=sku.strip(),
+                    product_data=product
+                )
+                db.session.add(cached_product)
+        
+        # Commit all changes
+        db.session.commit()
+        logger.info(f"Cache refreshed: {customer_count} customers, {product_count} products stored in database")
         
         return jsonify({
             'success': True,
@@ -671,15 +731,13 @@ def get_cached_customers():
         if not cred_row or not cred_row.account_id or not cred_row.application_key:
             return jsonify({'error': 'Cin7 credentials not found'}), 404
         
-        # Create API client
-        api_client = Cin7SalesAPI(
-            account_id=str(cred_row.account_id),
-            application_key=str(cred_row.application_key),
-            base_url='https://inventory.dearsystems.com/ExternalApi/v2/'
-        )
+        # Get cached customers from database
+        cached_customers = CachedCustomer.query.filter_by(
+            client_erp_credentials_id=cred_row.id
+        ).all()
         
-        # Get all customers from Cin7
-        customers = api_client.get_all_customers()
+        # Extract customer data from cache
+        customers = [cached.customer_data for cached in cached_customers]
         
         # Filter customers if search query provided
         if search_query:
@@ -752,15 +810,13 @@ def get_cached_products():
         if not cred_row or not cred_row.account_id or not cred_row.application_key:
             return jsonify({'error': 'Cin7 credentials not found'}), 404
         
-        # Create API client
-        api_client = Cin7SalesAPI(
-            account_id=str(cred_row.account_id),
-            application_key=str(cred_row.application_key),
-            base_url='https://inventory.dearsystems.com/ExternalApi/v2/'
-        )
+        # Get cached products from database
+        cached_products = CachedProduct.query.filter_by(
+            client_erp_credentials_id=cred_row.id
+        ).all()
         
-        # Get all products from Cin7
-        products = api_client.get_all_products()
+        # Extract product data from cache
+        products = [cached.product_data for cached in cached_products]
         
         # Filter products if search query provided
         if search_query:
@@ -1035,9 +1091,14 @@ def create_sales_orders():
         # Validate now
         validator = SalesOrderValidator(api_client)
         
-        # Preload latest customers and products from Cin7
+        # Preload latest customers and products from database cache
         try:
-            customer_count, product_count = validator.preload_customers_and_products()
+            # Get credential_id from session
+            credential_id = session.get('client_erp_credentials_id', session.get('client_id'))
+            customer_count, product_count = validator.preload_customers_and_products(
+                db_session=db.session,
+                client_erp_credentials_id=credential_id
+            )
             print(f"Preloaded {customer_count} customers and {product_count} products for validation")
         except Exception as e:
             print(f"Warning: Failed to preload customers/products: {str(e)}")
@@ -1103,14 +1164,32 @@ def create_sales_orders():
             # Rate limiting delay between Sale and Sale Order
             time.sleep(delay)
             
+            # Get customer and sale data for TaxRule lookup
+            customer_data = None
+            sale_data_from_api = None
+            
+            # Get customer data if CustomerID is available
+            if sale_data.get('CustomerID'):
+                try:
+                    customer_data = api_client.get_customer(str(sale_data['CustomerID']))
+                except Exception as customer_lookup_error:
+                    print(f"Warning: Could not retrieve customer data for TaxRule: {str(customer_lookup_error)}")
+            
+            # Get Sale data to extract TaxRule (if available)
+            try:
+                sale_data_from_api = api_client.get_sale(str(sale_id))
+            except Exception as sale_lookup_error:
+                print(f"Warning: Could not retrieve Sale data for TaxRule: {str(sale_lookup_error)}")
+            
             # Step 2: Build and create Sale Order
             # Check if this is a grouped order (multiple rows)
+            # Pass customer_data and sale_data so builder can extract TaxRule
             if 'group_rows' in row_result and row_result['group_rows']:
                 # Use grouped rows to build sale order with all line items
-                sale_order_data = builder.build_sale_order_from_rows(row_result['group_rows'], column_mapping, sale_id)
+                sale_order_data = builder.build_sale_order_from_rows(row_result['group_rows'], column_mapping, sale_id, customer_data=customer_data, sale_data=sale_data_from_api)
             else:
                 # Single row order
-                sale_order_data = builder.build_sale_order(row_result['data'], column_mapping, sale_id)
+                sale_order_data = builder.build_sale_order(row_result['data'], column_mapping, sale_id, customer_data=customer_data, sale_data=sale_data_from_api)
             
             # Create Sale Order via API
             so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)

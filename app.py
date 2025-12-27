@@ -20,14 +20,26 @@ def create_app(config_name=None):
         app.config['PREFERRED_URL_SCHEME'] = 'https'
     
     # Configure database
-    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['DATABASE_URL']
+    # Normalize postgres:// to postgresql:// (SQLAlchemy prefers postgresql://)
+    database_url = app.config['DATABASE_URL']
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        app.config['DATABASE_URL'] = database_url
+    
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    # Configure connection pool to limit connections per app instance
+    # Configure connection pool for Cloud Run (serverless) - optimized for transaction pooler
+    # Transaction pooler handles connection pooling at the database level, so we use smaller pools
+    # Supabase transaction pooler requires SSL connections
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_size': 5,  # Limit connections per app instance
-        'max_overflow': 10,  # Allow up to 10 additional connections beyond pool_size
+        'pool_size': 2,  # Small pool for transaction pooler (connections are pooled at DB level)
+        'max_overflow': 5,  # Minimal overflow since transaction pooler handles pooling
         'pool_pre_ping': True,  # Verify connections before using them
-        'pool_recycle': 3600,  # Recycle connections after 1 hour
+        'pool_recycle': 1800,  # Recycle connections after 30 minutes (shorter for serverless)
+        'connect_args': {
+            'connect_timeout': 10,  # 10 second connection timeout
+            'sslmode': 'require',  # Supabase transaction pooler requires SSL
+        }
     }
     
     # Initialize database connection

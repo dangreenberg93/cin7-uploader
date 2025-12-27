@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'add_csv_content_to_upload'
-down_revision = 'add_deployment_config_table'
+down_revision = 'add_deployment_config'
 branch_labels = None
 depends_on = None
 

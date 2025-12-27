@@ -224,15 +224,15 @@ class SalesOrderValidator:
         else:
             errors.append("CustomerName or CustomerID is required")
         
-        # Validate sale date - try to parse it
-        sale_date = mapped_data.get('SaleDate')
+        # Validate sale order date - try to parse it (check both SaleOrderDate and legacy SaleDate)
+        sale_date = mapped_data.get('SaleOrderDate') or mapped_data.get('SaleDate')
         if sale_date:
             from datetime import datetime
             from cin7_sales.csv_parser import CSVParser
             parser = CSVParser()
             parsed_date = parser._parse_date(sale_date, None)
             if not parsed_date:
-                errors.append(f"Invalid date format for SaleDate: {sale_date}. Could not parse date")
+                errors.append(f"Invalid date format for SaleOrderDate: {sale_date}. Could not parse date")
         
         # Validate currency
         currency = mapped_data.get('Currency', settings.get('default_currency', 'USD'))
@@ -434,7 +434,7 @@ class SalesOrderValidator:
         
         # Value exists - check if it's valid
         # Basic validation based on field type
-        if cin7_field == 'SaleDate' and value:
+        if (cin7_field == 'SaleOrderDate' or cin7_field == 'SaleDate') and value:
             from cin7_sales.csv_parser import CSVParser
             parser = CSVParser()
             parsed_date = parser._parse_date(value, None)
@@ -593,7 +593,7 @@ class SalesOrderValidator:
         row_groups = self._group_rows_by_order(rows, column_mapping)
         
         # Define required fields
-        required_fields = ['CustomerName', 'CustomerReference', 'SaleDate', 'SKU', 'Price']
+        required_fields = ['CustomerName', 'CustomerReference', 'SaleOrderDate', 'SKU', 'Price']
         optional_fields = ['Currency', 'TaxInclusive', 'ProductName', 'Quantity', 'Discount', 'Tax', 'Notes']
         
         # Process each group (order)
@@ -747,7 +747,7 @@ class SalesOrderValidator:
             # Calculate order metrics from preview payload
             po_number = mapped_data.get('CustomerReference', '')
             customer_name = mapped_data.get('CustomerName', '')
-            order_date = mapped_data.get('SaleDate', '')
+            order_date = mapped_data.get('SaleOrderDate') or mapped_data.get('SaleDate', '')
             due_date = mapped_data.get('ShipBy', '')
             line_item_count = 0
             total_cases = 0.0
@@ -809,9 +809,13 @@ class SalesOrderValidator:
         self.customers_loaded = False
         self.products_loaded = False
     
-    def preload_customers_and_products(self) -> Tuple[int, int]:
+    def preload_customers_and_products(self, db_session=None, client_erp_credentials_id=None) -> Tuple[int, int]:
         """
-        Preload all customers and products from Cin7 for faster validation.
+        Preload all customers and products from database cache or Cin7 API for faster validation.
+        
+        Args:
+            db_session: Optional database session to load from cache
+            client_erp_credentials_id: Optional credentials ID to filter cache
         
         Returns:
             (customer_count, product_count) - Number of customers and products loaded
@@ -819,9 +823,31 @@ class SalesOrderValidator:
         customer_count = 0
         product_count = 0
         
-        # Load customers
+        # Try to load from database cache first if session and credentials_id provided
+        customers = None
+        products = None
+        
+        if db_session and client_erp_credentials_id:
+            try:
+                from database import CachedCustomer, CachedProduct
+                cached_customers = db_session.query(CachedCustomer).filter_by(
+                    client_erp_credentials_id=client_erp_credentials_id
+                ).all()
+                cached_products = db_session.query(CachedProduct).filter_by(
+                    client_erp_credentials_id=client_erp_credentials_id
+                ).all()
+                
+                if cached_customers:
+                    customers = [cached.customer_data for cached in cached_customers]
+                if cached_products:
+                    products = [cached.product_data for cached in cached_products]
+            except Exception as e:
+                print(f"Error loading from database cache: {str(e)}, falling back to API")
+        
+        # Load customers from API if not loaded from cache
         try:
-            customers = self.api_client.get_all_customers()
+            if customers is None:
+                customers = self.api_client.get_all_customers()
             customer_count = len(customers)
             
             # Build lookup dictionaries
@@ -863,9 +889,10 @@ class SalesOrderValidator:
         except Exception as e:
             print(f"Error preloading customers: {str(e)}")
         
-        # Load products
+        # Load products from API if not loaded from cache
         try:
-            products = self.api_client.get_all_products()
+            if products is None:
+                products = self.api_client.get_all_products()
             product_count = len(products)
             
             # Build lookup dictionary by SKU (strip whitespace for consistent lookup)

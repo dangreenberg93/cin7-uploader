@@ -234,3 +234,36 @@ class PasswordResetToken(db.Model):
     expires_at = Column(DateTime, nullable=False, index=True)
     used = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CachedCustomer(db.Model):
+    """Cached customer data from Cin7 - stored in database for fast lookups"""
+    __tablename__ = 'cached_customer'
+    __table_args__ = (
+        UniqueConstraint('client_erp_credentials_id', 'cin7_customer_id', name='cached_customer_cred_customer_unique'),
+        {'schema': 'cin7_uploader'}
+    )
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
+    cin7_customer_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Cin7 customer ID
+    customer_data = Column(JSON, nullable=False)  # Full customer data from Cin7 API
+    cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class CachedProduct(db.Model):
+    """Cached product data from Cin7 - stored in database for fast lookups"""
+    __tablename__ = 'cached_product'
+    __table_args__ = (
+        UniqueConstraint('client_erp_credentials_id', 'sku', name='cached_product_cred_sku_unique'),
+        {'schema': 'cin7_uploader'}
+    )
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
+    cin7_product_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Cin7 product ID
+    sku = Column(String(255), nullable=False, index=True)  # Product SKU for lookup
+    product_data = Column(JSON, nullable=False)  # Full product data from Cin7 API
+    cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
