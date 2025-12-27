@@ -74,3 +74,4 @@ echo "  gcloud secrets create secret-name --data-file=-"
 echo "  gcloud run services update ${SERVICE_NAME} --region ${REGION} --update-secrets SECRET_KEY=secret-name:latest"
 
 
+

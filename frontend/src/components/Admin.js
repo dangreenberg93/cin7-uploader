@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { Badge } from './ui/badge';
-import { Plus, Trash2, Edit, Users, Building2, Key, Settings as SettingsIcon, Search, X, Save, StarOff, AlertCircle, Workflow, FileText, RefreshCw, Copy, Cloud, Terminal } from 'lucide-react';
+import { Plus, Trash2, Edit, Users, Building2, Key, Settings as SettingsIcon, Search, X, Save, StarOff, AlertCircle, Workflow, FileText, RefreshCw, Copy, Terminal } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { useClient } from '../contexts/ClientContext';
 import {
@@ -64,12 +64,6 @@ const Admin = ({ user }) => {
   const [workflowData, setWorkflowData] = useState(null);
   const [loadingWorkflow, setLoadingWorkflow] = useState(false);
   const [clientStatusFilter, setClientStatusFilter] = useState('active'); // 'active', 'inactive'
-  const [envFileContent, setEnvFileContent] = useState('');
-  const [serviceName, setServiceName] = useState('cin7-uploader');
-  const [region, setRegion] = useState('us-central1');
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [loadingConfig, setLoadingConfig] = useState(false);
-  const [applyingConfig, setApplyingConfig] = useState(false);
 
   useEffect(() => {
     if (selectedClientForEdit) {
@@ -80,10 +74,6 @@ const Admin = ({ user }) => {
   useEffect(() => {
     loadAllUsers();
   }, [allClients]); // Reload when clients change
-
-  useEffect(() => {
-    loadDeploymentConfig();
-  }, []); // Load on mount
 
   const loadClientDetails = async () => {
     if (!selectedClientForEdit) return;
@@ -348,107 +338,6 @@ const Admin = ({ user }) => {
     }
   };
 
-  const parseEnvFile = () => {
-    if (!envFileContent.trim()) {
-      return {};
-    }
-
-    // Parse .env content
-    const lines = envFileContent.split('\n');
-    const envVars = {};
-    
-    for (const line of lines) {
-      const trimmed = line.trim();
-      // Skip empty lines and comments
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      
-      // Parse KEY=VALUE
-      const equalIndex = trimmed.indexOf('=');
-      if (equalIndex === -1) continue;
-      
-      const key = trimmed.substring(0, equalIndex).trim();
-      let value = trimmed.substring(equalIndex + 1).trim();
-      
-      // Remove quotes if present
-      if ((value.startsWith('"') && value.endsWith('"')) || 
-          (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
-      
-      if (key && value) {
-        envVars[key] = value;
-      }
-    }
-    
-    return envVars;
-  };
-
-  const loadDeploymentConfig = async () => {
-    setLoadingConfig(true);
-    try {
-      const response = await axios.get('/admin/deployment/config');
-      const config = response.data;
-      setServiceName(config.service_name || 'cin7-uploader');
-      setRegion(config.region || 'us-central1');
-      
-      // Convert env vars object back to .env format
-      if (config.environment_variables && Object.keys(config.environment_variables).length > 0) {
-        const envContent = Object.entries(config.environment_variables)
-          .map(([key, value]) => `${key}=${value}`)
-          .join('\n');
-        setEnvFileContent(envContent);
-      } else {
-        setEnvFileContent('');
-      }
-    } catch (error) {
-      console.error('Error loading deployment config:', error);
-      if (error.response?.status !== 404) {
-        toast.error('Failed to load deployment configuration');
-      }
-    } finally {
-      setLoadingConfig(false);
-    }
-  };
-
-  const saveDeploymentConfig = async () => {
-    const envVars = parseEnvFile();
-    
-    if (Object.keys(envVars).length === 0 && !envFileContent.trim()) {
-      toast.error('Please paste your .env file content');
-      return;
-    }
-    
-    setSavingConfig(true);
-    try {
-      const response = await axios.post('/admin/deployment/config', {
-        service_name: serviceName,
-        region: region,
-        environment_variables: envVars
-      });
-      
-      toast.success('Deployment configuration saved successfully!');
-    } catch (error) {
-      console.error('Error saving deployment config:', error);
-      const errorMessage = error.response?.data?.error || 'Failed to save deployment configuration';
-      toast.error(errorMessage);
-    } finally {
-      setSavingConfig(false);
-    }
-  };
-
-  const applyDeploymentConfig = async () => {
-    setApplyingConfig(true);
-    try {
-      const response = await axios.post('/admin/deployment/apply');
-      toast.success('Environment variables applied to Cloud Run successfully!');
-    } catch (error) {
-      console.error('Error applying deployment config:', error);
-      const errorMessage = error.response?.data?.error || 'Failed to apply configuration to Cloud Run';
-      toast.error(errorMessage);
-    } finally {
-      setApplyingConfig(false);
-    }
-  };
 
   const handleUpdateUserRole = async (userId, newRole) => {
     try {
@@ -504,27 +393,21 @@ const Admin = ({ user }) => {
         onValueChange={(value) => {
           if (value === 'workflow') {
             loadWorkflow();
-          } else if (value === 'deployment') {
-            loadDeploymentConfig();
           }
         }}
       >
-        <TabsList>
-          <TabsTrigger value="clients">
-            <Building2 className="w-4 h-4 mr-2" />
+        <TabsList className="h-9 p-1">
+          <TabsTrigger value="clients" className="text-xs py-1.5 px-3">
+            <Building2 className="w-3 h-3 mr-1.5" />
             Clients
           </TabsTrigger>
-          <TabsTrigger value="users">
-            <Users className="w-4 h-4 mr-2" />
+          <TabsTrigger value="users" className="text-xs py-1.5 px-3">
+            <Users className="w-3 h-3 mr-1.5" />
             Users
           </TabsTrigger>
-          <TabsTrigger value="workflow">
-            <Workflow className="w-4 h-4 mr-2" />
+          <TabsTrigger value="workflow" className="text-xs py-1.5 px-3">
+            <Workflow className="w-3 h-3 mr-1.5" />
             Workflow
-          </TabsTrigger>
-          <TabsTrigger value="deployment">
-            <Cloud className="w-4 h-4 mr-2" />
-            Deployment
           </TabsTrigger>
         </TabsList>
         <div className="mb-4"></div>
@@ -1256,121 +1139,6 @@ const Admin = ({ user }) => {
             </CardContent>
           </Card>
 
-        </TabsContent>
-
-        <TabsContent value="deployment" className="space-y-6 mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Cloud className="w-5 h-5" />
-                Cloud Run Environment Variables
-              </CardTitle>
-              <CardDescription>
-                Store your environment variables in the database for easy management
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {/* Service Configuration */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="service-name">Service Name</Label>
-                  <Input
-                    id="service-name"
-                    value={serviceName}
-                    onChange={(e) => setServiceName(e.target.value)}
-                    placeholder="cin7-uploader"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="region">Region</Label>
-                  <Input
-                    id="region"
-                    value={region}
-                    onChange={(e) => setRegion(e.target.value)}
-                    placeholder="us-central1"
-                  />
-                </div>
-              </div>
-
-              {/* Paste .env File */}
-              <div>
-                <Label htmlFor="env-content">Paste .env File Content</Label>
-                <textarea
-                  id="env-content"
-                  value={envFileContent}
-                  onChange={(e) => setEnvFileContent(e.target.value)}
-                  placeholder={`DATABASE_URL=postgresql://...
-SECRET_KEY=...
-JWT_SECRET_KEY=...
-CORS_ORIGINS=https://yourdomain.com`}
-                  className="w-full min-h-[300px] p-3 border rounded-md font-mono text-sm"
-                />
-                <p className="text-xs text-muted-foreground mt-2">
-                  Paste your entire .env file content here
-                </p>
-              </div>
-
-              {/* Save and Apply Buttons */}
-              <div className="flex justify-end gap-2">
-                <Button
-                  onClick={saveDeploymentConfig}
-                  disabled={savingConfig || loadingConfig || !envFileContent.trim()}
-                  variant="outline"
-                >
-                  {savingConfig ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <Save className="w-4 h-4 mr-2" />
-                      Save to Database
-                    </>
-                  )}
-                </Button>
-                <Button
-                  onClick={applyDeploymentConfig}
-                  disabled={applyingConfig || loadingConfig}
-                >
-                  {applyingConfig ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                      Applying...
-                    </>
-                  ) : (
-                    <>
-                      <Cloud className="w-4 h-4 mr-2" />
-                      Apply to Cloud Run
-                    </>
-                  )}
-                </Button>
-              </div>
-
-              {loadingConfig && (
-                <div className="text-sm text-muted-foreground flex items-center gap-2">
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  Loading saved configuration...
-                </div>
-              )}
-
-              {/* Info */}
-              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-4">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5" />
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold text-blue-800 dark:text-blue-200">
-                      Configuration Saved
-                    </p>
-                    <p className="text-xs text-blue-700 dark:text-blue-300">
-                      Your environment variables are stored in the database. 
-                      You can retrieve them later or use the upload script to apply them to Cloud Run.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
         </TabsContent>
       </Tabs>
 

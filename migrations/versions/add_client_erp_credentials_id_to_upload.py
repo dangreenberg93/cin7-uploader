@@ -54,3 +54,4 @@ def downgrade():
     # Remove client_erp_credentials_id column
     op.drop_column('sales_order_upload', 'client_erp_credentials_id', schema='cin7_uploader')
 
+

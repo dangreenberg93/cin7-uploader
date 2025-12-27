@@ -807,8 +807,8 @@ const QueueView = () => {
                                           {/* Order Details for successful orders */}
                                           {(order.sale_payload || order.sale_order_payload) && (
                                             <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                                              {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details)}
-                                              {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details)}
+                                              {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
+                                              {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
                                             </div>
                                           )}
                                         </div>
@@ -875,8 +875,8 @@ const QueueView = () => {
                                           {/* Order Details */}
                                           {(order.sale_payload || order.sale_order_payload) && (
                                             <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                                              {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details)}
-                                              {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details)}
+                                              {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
+                                              {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
                                             </div>
                                           )}
                                         </div>
@@ -1059,8 +1059,8 @@ const QueueView = () => {
                                     {/* Order Details - reuse existing renderPayloadTable */}
                                     {(order.sale_payload || order.sale_order_payload) && (
                                       <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                                        {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details)}
-                                        {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details)}
+                                        {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
+                                        {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
                                       </div>
                                     )}
                                   </div>

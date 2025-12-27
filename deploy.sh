@@ -60,3 +60,4 @@ echo -e "${YELLOW}Don't forget to set environment variables:${NC}"
 echo "  gcloud run services update ${SERVICE_NAME} --region ${REGION} --update-env-vars KEY=VALUE"
 
 
+

@@ -1766,6 +1766,8 @@ def get_failed_orders():
                 'po_number': po_number,
                 'error_type': order_result.error_type,
                 'error_message': order_result.error_message,
+                'sale_id': str(order_result.sale_id) if order_result.sale_id else None,
+                'sale_order_id': str(order_result.sale_order_id) if order_result.sale_order_id else None,
                 'retry_count': order_result.retry_count or 0,
                 'last_retry_at': order_result.last_retry_at.isoformat() if order_result.last_retry_at else None,
                 'resolved_at': order_result.resolved_at.isoformat() if order_result.resolved_at else None,

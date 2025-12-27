@@ -704,6 +704,13 @@ class SalesOrderBuilder:
                             # If Quantity is missing, set it to 0
                             if 'Quantity' not in line or not line.get('Quantity'):
                                 line['Quantity'] = 0.0
+                            
+                            # Calculate Total (required by API) - Quantity * Price - Discount
+                            quantity = line.get('Quantity', 0)
+                            price = line.get('Price', 0)
+                            discount = line.get('Discount', 0.0)  # Discount defaults to 0 if not provided
+                            line['Total'] = (quantity * price) - discount
+                            
                             lines.append(line)
         
         return lines

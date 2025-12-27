@@ -67,3 +67,4 @@ def downgrade():
     op.drop_column('sales_order_result', 'last_retry_at', schema='cin7_uploader')
     op.drop_column('sales_order_result', 'retry_count', schema='cin7_uploader')
 
+

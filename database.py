@@ -177,20 +177,6 @@ class SalesOrderResult(db.Model):
     upload = relationship('SalesOrderUpload', back_populates='order_results')
 
 
-class DeploymentConfig(db.Model):
-    """Deployment configuration - stores Cloud Run environment variables"""
-    __tablename__ = 'deployment_config'
-    __table_args__ = {'schema': 'cin7_uploader'}
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    service_name = Column(String(255), nullable=False, default='cin7-uploader')
-    region = Column(String(100), nullable=False, default='us-central1')
-    environment_variables = Column(JSON, nullable=False)  # Key-value pairs of env vars
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    created_by = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)
-
-
 class Cin7ApiLog(db.Model):
     """Log of API calls to Cin7"""
     __tablename__ = 'cin7_api_log'
