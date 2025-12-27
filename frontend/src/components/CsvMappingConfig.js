@@ -4,7 +4,6 @@ import { toast } from 'sonner';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
@@ -161,13 +160,11 @@ const CsvMappingConfig = () => {
   if (!selectedClientId) {
     return (
       <div className="p-6">
-        <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-muted-foreground">
-              Please select a client from the sidebar to configure CSV mappings.
-            </p>
-          </CardContent>
-        </Card>
+        <div className="py-12 text-center">
+          <p className="text-muted-foreground">
+            Please select a client from the sidebar to configure CSV mappings.
+          </p>
+        </div>
       </div>
     );
   }
@@ -187,44 +184,36 @@ const CsvMappingConfig = () => {
         </Button>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Mapping Templates</CardTitle>
-          <CardDescription className="text-xs">
-            Configure how CSV columns map to Cin7 fields for {selectedClient?.name || 'this client'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {loading ? (
-            <div className="py-12 text-center">
-              <Loader2 className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
-              <p className="text-sm text-muted-foreground mt-2">Loading mappings...</p>
-            </div>
-          ) : mappings.length === 0 ? (
-            <div className="py-12 text-center">
-              <p className="text-muted-foreground">
-                No mappings configured. Create one to get started.
-              </p>
-            </div>
-          ) : (
-            <div className="rounded-md border overflow-hidden">
-              <Table className="border-0">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs">Name</TableHead>
-                    <TableHead className="text-xs">Default</TableHead>
-                    <TableHead className="text-xs">Fields Mapped</TableHead>
-                    <TableHead className="text-xs">Updated</TableHead>
-                    <TableHead className="text-right text-xs">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                {mappings.map((mapping) => (
-                  <TableRow key={mapping.id}>
-                    <TableCell className="font-medium text-xs">{mapping.mapping_name}</TableCell>
+      {loading ? (
+        <div className="py-12 text-center">
+          <Loader2 className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
+          <p className="text-sm text-muted-foreground mt-2">Loading mappings...</p>
+        </div>
+      ) : mappings.length === 0 ? (
+        <div className="py-12 text-center">
+          <p className="text-muted-foreground">
+            No mappings configured. Create one to get started.
+          </p>
+        </div>
+      ) : (
+        <div className="border-[1px] rounded-md overflow-hidden bg-white">
+          <Table className="border-0">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-xs">Name</TableHead>
+                <TableHead className="text-xs">Default</TableHead>
+                <TableHead className="text-xs">Fields Mapped</TableHead>
+                <TableHead className="text-xs">Updated</TableHead>
+                <TableHead className="text-right text-xs">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+            {mappings.map((mapping) => (
+              <TableRow key={mapping.id}>
+                <TableCell className="font-medium text-xs">{mapping.mapping_name}</TableCell>
                     <TableCell>
                       {mapping.is_default ? (
-                        <Badge variant="default">Default</Badge>
+                        <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 shadow-none hover:bg-primary">Default</Badge>
                       ) : (
                         <Button
                           variant="ghost"
@@ -236,42 +225,40 @@ const CsvMappingConfig = () => {
                         </Button>
                       )}
                     </TableCell>
-                    <TableCell className="text-xs">
-                      {Object.keys(mapping.column_mapping || {}).length} fields
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {mapping.updated_at
-                        ? new Date(mapping.updated_at).toLocaleDateString()
-                        : '-'}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleEdit(mapping)}
-                          className="h-6 text-xs"
-                        >
-                          <Edit className="h-3 w-3" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleDelete(mapping.id)}
-                          className="h-6 text-xs"
-                        >
-                          <Trash2 className="h-3 w-3 text-destructive" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                <TableCell className="text-xs">
+                  {Object.keys(mapping.column_mapping || {}).length} fields
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {mapping.updated_at
+                    ? new Date(mapping.updated_at).toLocaleDateString()
+                    : '-'}
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleEdit(mapping)}
+                      className="h-6 text-xs"
+                    >
+                      <Edit className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDelete(mapping.id)}
+                      className="h-6 text-xs"
+                    >
+                      <Trash2 className="h-3 w-3 text-destructive" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+        </div>
+      )}
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">

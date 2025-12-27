@@ -131,50 +131,53 @@ class SalesOrderUpload(db.Model):
     __table_args__ = {'schema': 'cin7_uploader'}
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)  # Nullable for webhook uploads
-    client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=True, index=True)  # Nullable for standalone connections
-    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # Store credentials ID for retry (FK constraint exists in DB, not in ORM)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)  # nullable for webhook uploads
+    client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=True, index=True)  # nullable for webhook uploads
+    client_erp_credentials_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client_erp_credentials.id'), nullable=True, index=True)
     filename = Column(String(500), nullable=False)
     total_rows = Column(Integer, nullable=False)
     successful_orders = Column(Integer, default=0, nullable=False)
     failed_orders = Column(Integer, default=0, nullable=False)
     status = Column(String(50), nullable=False)  # 'pending', 'processing', 'completed', 'failed'
     error_log = Column(JSON, nullable=True)  # Array of errors
-    csv_content = Column(Text, nullable=True)  # Store CSV content for preview (base64 encoded)
+    csv_content = Column(Text, nullable=True)  # Base64 encoded CSV content for preview
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     completed_at = Column(DateTime, nullable=True)
     
     # Relationships
     client = relationship('Client', back_populates='uploads')
-    order_results = relationship('SalesOrderResult', back_populates='upload', cascade='all, delete-orphan')
+    results = relationship('SalesOrderResult', back_populates='upload', cascade='all, delete-orphan')
 
 
 class SalesOrderResult(db.Model):
-    """Individual order processing results linked to SalesOrderUpload"""
+    """Results for individual sales orders from an upload"""
     __tablename__ = 'sales_order_result'
     __table_args__ = {'schema': 'cin7_uploader'}
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    upload_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_upload.id'), nullable=False, index=True)
-    order_key = Column(String(255), nullable=False)  # Order identifier (Invoice #, Order #, or ROW_#)
-    row_numbers = Column(JSON, nullable=True)  # Array of CSV row numbers in this order
-    status = Column(String(50), nullable=False)  # 'success', 'failed', 'processing'
-    sale_id = Column(UUID(as_uuid=True), nullable=True)  # Cin7 Sale ID if created
-    sale_order_id = Column(UUID(as_uuid=True), nullable=True)  # Cin7 Sale Order ID if created
-    error_message = Column(Text, nullable=True)  # Error details if failed
-    order_data = Column(JSON, nullable=True)  # Snapshot of order data (customer, PO, etc.)
+    upload_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_upload.id', ondelete='CASCADE'), nullable=False, index=True)
+    order_key = Column(String(255), nullable=False)  # Unique identifier for the order (e.g., invoice number)
+    row_numbers = Column(JSON, nullable=True)  # Array of row numbers from CSV that contributed to this order
+    status = Column(String(50), nullable=False)  # 'success', 'failed', 'pending', etc.
+    sale_id = Column(UUID(as_uuid=True), nullable=True)  # Cin7 sale ID if created
+    sale_order_id = Column(UUID(as_uuid=True), nullable=True)  # Cin7 sale order ID if created
+    error_message = Column(Text, nullable=True)  # Error message if failed
+    order_data = Column(JSON, nullable=True)  # Full order data that was sent to Cin7
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    processed_at = Column(DateTime, nullable=True)
+    processed_at = Column(DateTime, nullable=True)  # When the order was processed
     
-    # Task tracking fields
-    retry_count = Column(Integer, default=0, nullable=False)  # Number of retry attempts
-    last_retry_at = Column(DateTime, nullable=True)  # Timestamp of last retry
-    resolved_at = Column(DateTime, nullable=True)  # Timestamp when manually resolved
+    # Review tracking
+    reviewed = Column(Boolean, default=False, nullable=False, index=True)  # Whether this result has been reviewed
+    
+    # Task tracking for retries and resolution
+    retry_count = Column(Integer, default=0, nullable=False)
+    last_retry_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True, index=True)  # When the issue was resolved
     resolved_by = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True)  # User who resolved it
-    error_type = Column(String(50), nullable=True)  # Categorized error type (e.g., "customer_not_found", "missing_fields", "api_error")
+    error_type = Column(String(50), nullable=True, index=True)  # Type of error for categorization
     
     # Relationships
-    upload = relationship('SalesOrderUpload', back_populates='order_results')
+    upload = relationship('SalesOrderUpload', back_populates='results')
 
 
 class Cin7ApiLog(db.Model):
@@ -223,7 +226,7 @@ class PasswordResetToken(db.Model):
 
 
 class CachedCustomer(db.Model):
-    """Cached customer data from Cin7 - stored in database for fast lookups"""
+    """Cached customer data from Cin7 API"""
     __tablename__ = 'cached_customer'
     __table_args__ = (
         UniqueConstraint('client_erp_credentials_id', 'cin7_customer_id', name='cached_customer_cred_customer_unique'),
@@ -232,24 +235,23 @@ class CachedCustomer(db.Model):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
-    cin7_customer_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Cin7 customer ID
-    customer_data = Column(JSON, nullable=False)  # Full customer data from Cin7 API
+    cin7_customer_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    customer_data = Column(JSON, nullable=False)
     cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class CachedProduct(db.Model):
-    """Cached product data from Cin7 - stored in database for fast lookups"""
+    """Cached product data from Cin7 API"""
     __tablename__ = 'cached_product'
     __table_args__ = (
-        UniqueConstraint('client_erp_credentials_id', 'sku', name='cached_product_cred_sku_unique'),
+        UniqueConstraint('client_erp_credentials_id', 'cin7_product_id', name='cached_product_cred_product_unique'),
         {'schema': 'cin7_uploader'}
     )
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
-    cin7_product_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Cin7 product ID
-    sku = Column(String(255), nullable=False, index=True)  # Product SKU for lookup
-    product_data = Column(JSON, nullable=False)  # Full product data from Cin7 API
+    cin7_product_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    product_data = Column(JSON, nullable=False)
     cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

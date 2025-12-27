@@ -59,10 +59,12 @@ class Cin7SalesAPI:
         response_body = None
         error_message = None
         is_json_response = False
+        raw_response_text = response.text if response.text else None
         
         # Try to parse as JSON first
         try:
             if response.content:
+                # Parse JSON but preserve raw text for order preservation
                 response_body = response.json()
                 is_json_response = True
         except:
@@ -90,6 +92,9 @@ class Cin7SalesAPI:
                 return (False, error_message, None)
             success = True
             message = "Success"
+            # Store raw JSON text in result to preserve exact order when needed
+            if is_json_response and raw_response_text and isinstance(response_body, dict):
+                response_body['_raw_json_text'] = raw_response_text
             result = response_body
         elif response.status_code == 429:
             success = False
@@ -149,6 +154,8 @@ class Cin7SalesAPI:
             # Sanitize headers (remove sensitive keys)
             safe_headers = {k: v for k, v in request_headers.items() 
                           if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+            # Use raw JSON text if available to preserve exact order, otherwise use parsed body
+            response_body_for_log = raw_response_text if (raw_response_text and is_json_response) else response_body
             self.logger_callback(
                 endpoint=endpoint,
                 method=method,
@@ -156,7 +163,7 @@ class Cin7SalesAPI:
                 request_headers=safe_headers,
                 request_body=request_body,
                 response_status=response.status_code,
-                response_body=response_body,
+                response_body=response_body_for_log,
                 error_message=error_message,
                 duration_ms=duration_ms
             )

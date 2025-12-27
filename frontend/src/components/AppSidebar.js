@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, ChevronsUpDown, Shield, FileText, Cog, ShoppingCart, List } from 'lucide-react';
+import { LogOut, ChevronsUpDown, Shield, FileText, Cog, Upload, List, Database, AlertCircle } from 'lucide-react';
 import { useClient } from '../contexts/ClientContext';
+import axios from 'axios';
+import { Badge } from './ui/badge';
 import {
   Sidebar,
   SidebarContent,
@@ -28,6 +30,8 @@ export function AppSidebar({ user, onLogout }) {
   const location = useLocation();
   const [avatarError, setAvatarError] = useState(false);
   const { selectedClient, selectedClientId, setSelectedClientId, clients } = useClient();
+  const [failedOrdersCount, setFailedOrdersCount] = useState(0);
+  const [unreviewedCount, setUnreviewedCount] = useState(0);
 
   // Reset avatar error state when user changes
   useEffect(() => {
@@ -45,6 +49,34 @@ export function AppSidebar({ user, onLogout }) {
       img.src = user.avatar_url;
     }
   }, [user?.avatar_url, avatarError]);
+
+  // Load queue counts
+  useEffect(() => {
+    if (!selectedClientId) {
+      setFailedOrdersCount(0);
+      setUnreviewedCount(0);
+      return;
+    }
+
+    const loadCounts = async () => {
+      try {
+        // Load failed orders count
+        const failedResponse = await axios.get('/webhooks/orders/failed');
+        setFailedOrdersCount(failedResponse.data.failed_orders?.length || 0);
+
+        // Load unreviewed count
+        const unreviewedResponse = await axios.get('/webhooks/orders/completed/unreviewed-count');
+        setUnreviewedCount(unreviewedResponse.data.unreviewed_count || 0);
+      } catch (error) {
+        console.error('Failed to load queue counts:', error);
+      }
+    };
+
+    loadCounts();
+    // Refresh every 30 seconds
+    const interval = setInterval(loadCounts, 30000);
+    return () => clearInterval(interval);
+  }, [selectedClientId]);
 
   return (
     <Sidebar>
@@ -128,18 +160,70 @@ export function AppSidebar({ user, onLogout }) {
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/queue'}>
-                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/queue'); }}>
+                <SidebarMenuButton 
+                  asChild 
+                  isActive={
+                    (location.pathname === '/' || location.pathname === '/queue') && 
+                    !location.search.includes('tab=failed') && 
+                    !location.search.includes('review=needs-review')
+                  }
+                >
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
                     <List />
                     <span>Queue</span>
                   </a>
                 </SidebarMenuButton>
+                {(failedOrdersCount > 0 || unreviewedCount > 0) && (
+                  <div className="ml-6 mt-1 space-y-0.5">
+                    {unreviewedCount > 0 && (
+                      <SidebarMenuButton 
+                        asChild 
+                        size="sm"
+                        className="h-7 text-xs pl-2"
+                        isActive={location.pathname === '/' && location.search.includes('review=needs-review')}
+                      >
+                        <a href="#" onClick={(e) => { 
+                          e.preventDefault(); 
+                          navigate('/?tab=completed&review=needs-review'); 
+                        }}>
+                          <span>To Review</span>
+                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
+                        </a>
+                      </SidebarMenuButton>
+                    )}
+                    {failedOrdersCount > 0 && (
+                      <SidebarMenuButton 
+                        asChild 
+                        size="sm"
+                        className="h-7 text-xs pl-2"
+                        isActive={location.pathname === '/' && location.search.includes('tab=failed')}
+                      >
+                        <a href="#" onClick={(e) => { 
+                          e.preventDefault(); 
+                          navigate('/?tab=failed'); 
+                        }}>
+                          <AlertCircle className="h-3 w-3" />
+                          <span>Failed Orders</span>
+                          <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0 h-4 shadow-none hover:bg-destructive">{failedOrdersCount}</Badge>
+                        </a>
+                      </SidebarMenuButton>
+                    )}
+                  </div>
+                )}
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/'}>
-                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
-                    <ShoppingCart />
-                    <span>New Order Upload</span>
+                <SidebarMenuButton asChild isActive={location.pathname === '/upload'}>
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/upload'); }}>
+                    <Upload />
+                    <span>Manual Upload</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild isActive={location.pathname === '/data'}>
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/data'); }}>
+                    <Database />
+                    <span>Data</span>
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>

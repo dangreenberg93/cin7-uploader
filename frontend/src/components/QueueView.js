@@ -1,18 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
+import { useClient } from '../contexts/ClientContext';
+import { useConnection } from '../contexts/ConnectionContext';
+import { useActivityLog } from '../contexts/ActivityLogContext';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { Checkbox } from './ui/checkbox';
-import { ChevronDown, ChevronRight, RefreshCw, CheckCircle2, XCircle, Clock, FileText, RotateCcw, Eye, Download, Code, AlertCircle } from 'lucide-react';
+import { Input } from './ui/input';
+import { ChevronDown, ChevronRight, RefreshCw, CheckCircle2, XCircle, FileText, RotateCcw, Eye, Download, Code, AlertCircle, Circle, Check, ArrowUp, ArrowDown, Search } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { cn } from '../lib/utils';
 
 const QueueView = () => {
+  const { selectedClientId } = useClient();
+  const { setConnected, setCredentials, setTestConnection } = useConnection();
+  const { addTerminalLine } = useActivityLog();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [uploads, setUploads] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
@@ -43,6 +53,169 @@ const QueueView = () => {
   const [completedOrdersLoading, setCompletedOrdersLoading] = useState(true);
   const [isCompletedOrdersInitialLoad, setIsCompletedOrdersInitialLoad] = useState(true);
   const [expandedCompletedOrders, setExpandedCompletedOrders] = useState(new Set());
+  const [unreviewedCount, setUnreviewedCount] = useState(0);
+  
+  // Global filter and sort state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [dateSortDirection, setDateSortDirection] = useState(null); // 'asc', 'desc', or null
+  const [reviewFilterTab, setReviewFilterTab] = useState('all'); // 'needs-review' or 'all' for completed orders
+  const [activeTab, setActiveTab] = useState('completed'); // 'completed', 'failed', or 'uploads'
+
+  // Filter and sort uploads
+  const filteredAndSortedUploads = useMemo(() => {
+    let filtered = [...uploads];
+    
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      filtered = filtered.filter(upload => {
+        const filename = (upload.filename || '').toLowerCase();
+        const hasMatchingOrder = upload.order_results?.some(order => {
+          const orderKey = (order.order_key || '').toLowerCase();
+          const customerName = ((order.customer_name || 
+            (order.sale_payload && (order.sale_payload.Customer || order.sale_payload.customer_name)) ||
+            (order.sale_order_payload && (order.sale_order_payload.Customer || order.sale_order_payload.customer_name))) || '').toLowerCase();
+          return orderKey.includes(query) || customerName.includes(query);
+        });
+        return filename.includes(query) || hasMatchingOrder;
+      });
+    }
+    
+    // Apply date sort
+    if (dateSortDirection) {
+      filtered.sort((a, b) => {
+        const dateA = new Date(a.created_at || 0).getTime();
+        const dateB = new Date(b.created_at || 0).getTime();
+        return dateSortDirection === 'asc' ? dateA - dateB : dateB - dateA;
+      });
+    }
+    
+    return filtered;
+  }, [uploads, searchQuery, dateSortDirection]);
+
+  // Filter and sort failed orders
+  const filteredAndSortedFailedOrders = useMemo(() => {
+    let filtered = [...failedOrders];
+    
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      filtered = filtered.filter(order => {
+        const orderKey = (order.order_key || '').toLowerCase();
+        const customerName = ((order.customer_name || 
+          (order.sale_payload && (order.sale_payload.Customer || order.sale_payload.customer_name))) || '').toLowerCase();
+        const poNumber = (order.po_number || '').toLowerCase();
+        return orderKey.includes(query) || customerName.includes(query) || poNumber.includes(query);
+      });
+    }
+    
+    // Apply date sort (using last_retry_at or created_at if available)
+    if (dateSortDirection) {
+      filtered.sort((a, b) => {
+        const dateA = new Date(a.last_retry_at || a.created_at || 0).getTime();
+        const dateB = new Date(b.last_retry_at || b.created_at || 0).getTime();
+        return dateSortDirection === 'asc' ? dateA - dateB : dateB - dateA;
+      });
+    }
+    
+    return filtered;
+  }, [failedOrders, searchQuery, dateSortDirection]);
+
+  // Filter and sort completed orders
+  const filteredAndSortedCompletedOrders = useMemo(() => {
+    let filtered = [...completedOrders];
+    
+    // Apply review filter (show only unreviewed orders)
+    if (reviewFilterTab === 'needs-review') {
+      filtered = filtered.filter(order => !order.reviewed);
+    }
+    
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      filtered = filtered.filter(order => {
+        const orderKey = (order.order_key || '').toLowerCase();
+        const customerName = ((order.customer_name || 
+          (order.sale_payload && (order.sale_payload.Customer || order.sale_payload.customer_name))) || '').toLowerCase();
+        const poNumber = ((order.po_number || 
+          (order.sale_payload && (order.sale_payload.CustomerReference || order.sale_payload.customer_reference))) || '').toLowerCase();
+        return orderKey.includes(query) || customerName.includes(query) || poNumber.includes(query);
+      });
+    }
+    
+    // Apply date sort (using processed_at)
+    if (dateSortDirection) {
+      filtered.sort((a, b) => {
+        const dateA = new Date(a.processed_at || 0).getTime();
+        const dateB = new Date(b.processed_at || 0).getTime();
+        return dateSortDirection === 'asc' ? dateA - dateB : dateB - dateA;
+      });
+    }
+    
+    return filtered;
+  }, [completedOrders, reviewFilterTab, searchQuery, dateSortDirection]);
+
+  // Initialize connection status
+  useEffect(() => {
+    if (!selectedClientId) {
+      setConnected(false);
+      setCredentials(null);
+      return;
+    }
+
+    const checkConnection = async () => {
+      try {
+        const response = await axios.get(`/credentials/clients/${selectedClientId}`);
+        const creds = response.data;
+        
+        if (creds && creds.account_id && creds.application_key) {
+          setCredentials(creds);
+          // Test connection
+          try {
+            await axios.post(`/credentials/clients/${selectedClientId}/test`);
+            setConnected(true);
+            addTerminalLine('success', 'Connected to Cin7 API');
+          } catch (error) {
+            setConnected(false);
+            addTerminalLine('error', `Connection test failed: ${error.message}`);
+          }
+        } else {
+          setConnected(false);
+          setCredentials(null);
+        }
+      } catch (error) {
+        setConnected(false);
+        setCredentials(null);
+        addTerminalLine('error', `Failed to load credentials: ${error.message}`);
+      }
+    };
+
+    checkConnection();
+  }, [selectedClientId, setConnected, setCredentials, addTerminalLine]);
+
+  // Expose testConnection function
+  useEffect(() => {
+    const testConnection = async () => {
+      if (!selectedClientId) {
+        toast.error('Please select a client first');
+        return;
+      }
+
+      try {
+        addTerminalLine('info', 'Testing connection to Cin7...');
+        await axios.post(`/credentials/clients/${selectedClientId}/test`);
+        setConnected(true);
+        addTerminalLine('success', 'Connected to Cin7 API');
+        toast.success('Connected to Cin7');
+      } catch (error) {
+        setConnected(false);
+        addTerminalLine('error', `Connection test failed: ${error.message}`);
+        toast.error('Connection test failed');
+      }
+    };
+
+    setTestConnection(() => testConnection);
+  }, [selectedClientId, setConnected, setTestConnection, addTerminalLine]);
 
   const loadQueue = async (isRefresh = false) => {
     try {
@@ -92,13 +265,26 @@ const QueueView = () => {
     }
   };
 
-  // Load API logs when modal opens with an order
+  // Load API logs when modal opens with an order or upload
   useEffect(() => {
     if (jsonModalOpen && viewingOrderPayload) {
-      // Try different possible ID fields - check all possible locations
-      const orderId = viewingOrderPayload.id || 
-                     viewingOrderPayload.order_result_id ||
-                     (viewingOrderPayload.order_data && viewingOrderPayload.order_data.id);
+      let orderId = null;
+      
+      // Check if this is an upload object (has order_results as direct property)
+      // Uploads are passed as { upload, order_results }
+      // Orders are passed directly and have properties like sale_payload, id, etc.
+      if (viewingOrderPayload.order_results && Array.isArray(viewingOrderPayload.order_results)) {
+        // This is an upload - use the first order_result's ID to load logs
+        // (the endpoint returns all logs for the upload anyway)
+        if (viewingOrderPayload.order_results.length > 0) {
+          orderId = viewingOrderPayload.order_results[0].id;
+        }
+      } else {
+        // This is an order - try different possible ID fields
+        orderId = viewingOrderPayload.id || 
+                   viewingOrderPayload.order_result_id ||
+                   (viewingOrderPayload.order_data && viewingOrderPayload.order_data.id);
+      }
       
       console.log('Modal opened with order payload:', viewingOrderPayload);
       console.log('Extracted order ID:', orderId);
@@ -160,31 +346,104 @@ const QueueView = () => {
     }
   };
 
+  const loadUnreviewedCount = async () => {
+    try {
+      const response = await axios.get('/webhooks/orders/completed/unreviewed-count');
+      const count = response.data.unreviewed_count || 0;
+      setUnreviewedCount(count);
+      // Set default tab based on unreviewed count (only on initial load or if currently on needs-review with 0 count)
+      setReviewFilterTab(prev => {
+        if (count > 0 && prev === 'all') {
+          return 'needs-review';
+        } else if (count === 0 && prev === 'needs-review') {
+          return 'all';
+        }
+        return prev;
+      });
+    } catch (error) {
+      console.error('Failed to load unreviewed count:', error);
+      // Don't show error toast for this, just log it
+    }
+  };
+
+  const markOrderAsReviewed = async (orderId, reviewed) => {
+    try {
+      await axios.post(`/webhooks/orders/${orderId}/review`, { reviewed });
+      // Update the order in local state
+      setCompletedOrders(prevOrders => 
+        prevOrders.map(order => 
+          order.id === orderId ? { ...order, reviewed } : order
+        )
+      );
+      // Update the unreviewed count
+      if (reviewed) {
+        setUnreviewedCount(prev => {
+          const newCount = Math.max(0, prev - 1);
+          // If we're on "needs-review" tab and count becomes 0, switch to "all"
+          if (newCount === 0 && reviewFilterTab === 'needs-review') {
+            setReviewFilterTab('all');
+          }
+          return newCount;
+        });
+        toast.success('Order marked as reviewed');
+      } else {
+        setUnreviewedCount(prev => prev + 1);
+        toast.success('Order marked as unreviewed');
+      }
+    } catch (error) {
+      console.error('Failed to update order reviewed status:', error);
+      toast.error(error.response?.data?.error || 'Failed to update order reviewed status');
+    }
+  };
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
       await Promise.all([
         loadQueue(true),
         loadFailedOrders(true),
-        loadCompletedOrders(true)
+        loadCompletedOrders(true),
+        loadUnreviewedCount()
       ]);
     } finally {
       setIsRefreshing(false);
     }
   };
 
+  // Handle URL params for tab navigation
   useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const tab = params.get('tab');
+    const review = params.get('review');
+    
+    if (tab === 'failed') {
+      setActiveTab('failed');
+    } else if (tab === 'completed') {
+      setActiveTab('completed');
+      if (review === 'needs-review') {
+        setReviewFilterTab('needs-review');
+      }
+    } else if (tab === 'uploads') {
+      setActiveTab('uploads');
+    }
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!selectedClientId) return;
     loadQueue();
     loadFailedOrders();
     loadCompletedOrders();
+    loadUnreviewedCount();
     // Refresh every 30 seconds (silent refresh)
     const interval = setInterval(() => {
       loadQueue(true);
       loadFailedOrders(true);
       loadCompletedOrders(true);
+      loadUnreviewedCount();
     }, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedClientId]);
+
 
   const toggleExpand = (uploadId) => {
     const newExpanded = new Set(expandedUploads);
@@ -199,15 +458,15 @@ const QueueView = () => {
   const getStatusBadge = (status) => {
     switch (status) {
       case 'completed':
-        return <Badge variant="default" className="bg-green-500">Completed</Badge>;
+        return <Badge variant="default" className="bg-green-500 shadow-none hover:bg-green-500 px-1.5 py-0 text-[10px]">Completed</Badge>;
       case 'processing':
-        return <Badge variant="default" className="bg-blue-500">Processing</Badge>;
+        return <Badge variant="default" className="bg-blue-500 shadow-none hover:bg-blue-500 px-1.5 py-0 text-[10px]">Processing</Badge>;
       case 'failed':
-        return <Badge variant="destructive">Failed</Badge>;
+        return <Badge variant="destructive" className="shadow-none hover:bg-destructive px-1.5 py-0 text-[10px]">Failed</Badge>;
       case 'duplicate':
-        return <Badge variant="secondary" className="bg-yellow-500 text-white">Duplicate</Badge>;
+        return <Badge variant="secondary" className="bg-yellow-500 text-white shadow-none hover:bg-yellow-500 px-1.5 py-0 text-[10px]">Duplicate</Badge>;
       default:
-        return <Badge variant="secondary">{status}</Badge>;
+        return <Badge variant="secondary" className="shadow-none hover:bg-secondary px-1.5 py-0 text-[10px]">{status}</Badge>;
     }
   };
 
@@ -318,6 +577,8 @@ const QueueView = () => {
   };
 
   const toggleSelectAll = (checked) => {
+    // Use failedOrders directly since this is called from the table header
+    // The filtered list is used for rendering, but we want to select all visible items
     if (checked) {
       setSelectedOrderIds(new Set(failedOrders.map(o => o.id)));
     } else {
@@ -432,15 +693,9 @@ const QueueView = () => {
               <div className="text-xs font-semibold text-gray-700 mb-1">{title}</div>
               <div className="border-[0.5px] rounded-md overflow-hidden bg-white">
                 <Table>
-                  <TableHeader>
-                    <TableRow className="bg-gray-50">
-                      <TableHead className="w-1/3 font-semibold text-xs">Field</TableHead>
-                      <TableHead className="font-semibold text-xs">Value</TableHead>
-                    </TableRow>
-                  </TableHeader>
                   <TableBody>
                     {Object.entries(payload)
-                      .filter(([key]) => key !== 'Lines' && key !== 'CustomerID')
+                      .filter(([key]) => key !== 'Lines' && key !== 'CustomerID' && key !== 'Type')
                       .map(([key, value]) => {
                         const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
                         const isEmpty = value === null || value === undefined || value === '';
@@ -490,7 +745,7 @@ const QueueView = () => {
           <div>
             <div className="text-xs font-semibold text-gray-700 mb-1">{title}</div>
             {payload.Lines.length > 0 ? (
-              <div className="border rounded-md overflow-hidden bg-white">
+              <div className="border-[1px] rounded-md overflow-hidden bg-white">
                 <div className="overflow-x-auto">
                   <Table>
                     <TableHeader>
@@ -562,15 +817,9 @@ const QueueView = () => {
           <div className="text-xs font-semibold text-gray-700 mb-1">{title}</div>
           <div className="border-[0.5px] rounded-md overflow-hidden bg-white">
             <Table>
-              <TableHeader>
-                <TableRow className="bg-gray-50">
-                  <TableHead className="w-1/3 font-semibold text-xs">Field</TableHead>
-                  <TableHead className="font-semibold text-xs">Value</TableHead>
-                </TableRow>
-              </TableHeader>
               <TableBody>
                 {Object.entries(payload)
-                  .filter(([key]) => key !== 'CustomerID')
+                  .filter(([key]) => key !== 'CustomerID' && key !== 'Type')
                   .map(([key, value]) => {
                   const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
                   const isEmpty = value === null || value === undefined || value === '';
@@ -626,49 +875,110 @@ const QueueView = () => {
   return (
     <div className="h-full w-full overflow-y-auto">
       <div className="p-6 space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold">Upload Queue</h1>
-            <p className="text-xs text-muted-foreground mt-1">
-              View order processing results from email webhooks
-            </p>
-          </div>
-          <Button onClick={handleRefresh} variant="outline" disabled={isRefreshing}>
-            <RefreshCw className={cn("h-4 w-4 mr-2", isRefreshing && "animate-spin")} />
-            Refresh
-          </Button>
-        </div>
-
-        <Tabs defaultValue="failed" className="w-full">
-          <div className="flex items-center justify-between mb-4">
-            <TabsList className="h-9 p-1">
-              <TabsTrigger value="failed" className="text-xs py-1.5 px-3">
-                Failed Orders
-                {failedOrders.length > 0 && (
-                  <Badge variant="destructive" className="ml-1.5 text-[10px] px-1.5 py-0 h-4">{failedOrders.length}</Badge>
+        <Tabs 
+          value={activeTab} 
+          onValueChange={(value) => {
+            setActiveTab(value);
+            // Update URL based on tab
+            const params = new URLSearchParams(location.search);
+            if (value === 'failed') {
+              params.set('tab', 'failed');
+              params.delete('review');
+            } else if (value === 'completed') {
+              params.set('tab', 'completed');
+              // Keep review param if it exists
+            } else if (value === 'uploads') {
+              params.set('tab', 'uploads');
+              params.delete('review');
+            }
+            navigate(`/?${params.toString()}`, { replace: true });
+          }} 
+          defaultValue="completed" 
+          className="w-full"
+        >
+          <div className="space-y-3 mb-4">
+            <div className="flex items-center justify-between">
+              <TabsList className="h-9 p-1">
+                <TabsTrigger value="completed" className="text-xs py-1.5 px-3">
+                  Sync'd Orders
+                  {unreviewedCount > 0 && activeTab !== 'completed' && (
+                    <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
+                  )}
+                </TabsTrigger>
+                <TabsTrigger value="failed" className="text-xs py-1.5 px-3">
+                  Failed Orders
+                  {failedOrders.length > 0 && (
+                    <Badge variant="destructive" className="ml-1.5 text-[10px] px-1.5 py-0 h-4">{failedOrders.length}</Badge>
+                  )}
+                </TabsTrigger>
+                <TabsTrigger value="uploads" className="text-xs py-1.5 px-3">All Uploads</TabsTrigger>
+              </TabsList>
+              <div className="flex items-center gap-2">
+                <Button onClick={handleRefresh} variant="outline" disabled={isRefreshing} className="h-9 px-3 text-xs">
+                  <RefreshCw className={cn("h-4 w-4 mr-2", isRefreshing && "animate-spin")} />
+                  Refresh
+                </Button>
+                {/* Bulk Actions */}
+                <div className="flex items-center gap-2" style={{ minHeight: '36px' }}>
+                {selectedOrderIds.size > 0 && (
+                  <>
+                    <Button onClick={bulkRetryOrders} variant="default" size="sm" className="h-7 text-xs px-2">
+                      <RotateCcw className="h-3 w-3 mr-1.5" />
+                      Retry ({selectedOrderIds.size})
+                    </Button>
+                    <Button onClick={bulkResolveOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
+                      Resolve ({selectedOrderIds.size})
+                    </Button>
+                  </>
                 )}
-              </TabsTrigger>
-              <TabsTrigger value="completed" className="text-xs py-1.5 px-3">
-                Completed Orders
-                {completedOrders.length > 0 && (
-                  <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 bg-green-500">{completedOrders.length}</Badge>
-                )}
-              </TabsTrigger>
-              <TabsTrigger value="uploads" className="text-xs py-1.5 px-3">All Uploads</TabsTrigger>
-            </TabsList>
-            {/* Bulk Actions */}
-            <div className="flex items-center gap-2" style={{ minHeight: '36px' }}>
-              {selectedOrderIds.size > 0 && (
-                <>
-                  <Button onClick={bulkRetryOrders} variant="default" size="sm" className="h-7 text-xs px-2">
-                    <RotateCcw className="h-3 w-3 mr-1.5" />
-                    Retry ({selectedOrderIds.size})
-                  </Button>
-                  <Button onClick={bulkResolveOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
-                    Resolve ({selectedOrderIds.size})
-                  </Button>
-                </>
+                </div>
+              </div>
+            </div>
+            {/* Global Filters and Search */}
+            <div className="flex items-center gap-3">
+              {activeTab === 'completed' && (
+                <Tabs 
+                  value={reviewFilterTab} 
+                  onValueChange={(value) => {
+                    setReviewFilterTab(value);
+                    // Update URL
+                    const params = new URLSearchParams(location.search);
+                    params.set('tab', 'completed');
+                    if (value === 'needs-review') {
+                      params.set('review', 'needs-review');
+                    } else {
+                      params.delete('review');
+                    }
+                    navigate(`/?${params.toString()}`, { replace: true });
+                  }} 
+                  className="w-auto"
+                >
+                  <TabsList className="h-9 p-1">
+                    <TabsTrigger 
+                      value="needs-review" 
+                      className="text-xs py-1.5 px-3"
+                      disabled={unreviewedCount === 0}
+                    >
+                      Needs Review
+                      {unreviewedCount > 0 && (
+                        <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
+                      )}
+                    </TabsTrigger>
+                    <TabsTrigger value="all" className="text-xs py-1.5 px-3">
+                      All
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
               )}
+              <div className="relative flex-1 max-w-sm">
+                <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-8 h-9 text-xs"
+                />
+              </div>
             </div>
           </div>
 
@@ -677,40 +987,48 @@ const QueueView = () => {
             <div className="overflow-x-auto">
           {loading && isInitialLoad ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
-          ) : uploads.length === 0 ? (
+          ) : filteredAndSortedUploads.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">No uploads found</div>
           ) : (
-            <Table>
+            <div className="border-[1px] rounded-md overflow-hidden bg-white">
+              <Table className="border-0">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-12"></TableHead>
                   <TableHead>Filename</TableHead>
-                  <TableHead>Date</TableHead>
+                  <TableHead>
+                    <button
+                      onClick={() => {
+                        if (dateSortDirection === null) {
+                          setDateSortDirection('desc');
+                        } else if (dateSortDirection === 'desc') {
+                          setDateSortDirection('asc');
+                        } else {
+                          setDateSortDirection(null);
+                        }
+                      }}
+                      className="flex items-center gap-1 hover:opacity-70 transition-opacity text-left"
+                    >
+                      Date
+                      {dateSortDirection === 'asc' && <ArrowUp className="h-3 w-3" />}
+                      {dateSortDirection === 'desc' && <ArrowDown className="h-3 w-3" />}
+                    </button>
+                  </TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Orders</TableHead>
                   <TableHead className="text-right">Successful</TableHead>
                   <TableHead className="text-right">Failed</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {uploads.map((upload) => {
+                {filteredAndSortedUploads.map((upload) => {
                   const isExpanded = expandedUploads.has(upload.id);
                   const successfulOrders = upload.order_results?.filter(or => or.status === 'success') || [];
-                  const failedOrders = upload.order_results?.filter(or => or.status === 'failed') || [];
+                  const failedOrdersForUpload = upload.order_results?.filter(or => or.status === 'failed') || [];
                   
                   return (
                     <React.Fragment key={upload.id}>
-                      <TableRow
-                        className="cursor-pointer hover:bg-muted/50"
-                        onClick={() => toggleExpand(upload.id)}
-                      >
-                        <TableCell>
-                          {isExpanded ? (
-                            <ChevronDown className="h-4 w-4" />
-                          ) : (
-                            <ChevronRight className="h-4 w-4" />
-                          )}
-                        </TableCell>
+                      <TableRow className="hover:bg-muted/50">
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <FileText className="h-4 w-4 text-muted-foreground" />
@@ -733,8 +1051,29 @@ const QueueView = () => {
                         <TableCell>{formatDate(upload.created_at)}</TableCell>
                         <TableCell>{getStatusBadge(upload.status)}</TableCell>
                         <TableCell className="text-right">{upload.order_results?.length || 0}</TableCell>
-                        <TableCell className="text-right text-green-600">{upload.successful_orders || 0}</TableCell>
-                        <TableCell className="text-right text-red-600">{upload.failed_orders || 0}</TableCell>
+                        <TableCell className="text-right text-green-600">{successfulOrders.length}</TableCell>
+                        <TableCell className="text-right text-red-600">{failedOrdersForUpload.length}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newExpanded = new Set(expandedUploads);
+                                if (newExpanded.has(upload.id)) {
+                                  newExpanded.delete(upload.id);
+                                } else {
+                                  newExpanded.add(upload.id);
+                                }
+                                setExpandedUploads(newExpanded);
+                              }}
+                              className="h-7 text-xs px-0"
+                            >
+                              {isExpanded ? 'Hide Details' : 'See Details'}
+                            </Button>
+                          </div>
+                        </TableCell>
                       </TableRow>
                       {isExpanded && (
                         <TableRow>
@@ -819,14 +1158,14 @@ const QueueView = () => {
                               )}
                               
                               {/* Failed Orders */}
-                              {failedOrders.length > 0 && (
+                              {failedOrdersForUpload.length > 0 && (
                                 <div>
                                   <h4 className="font-semibold text-xs mb-1.5 flex items-center gap-2 text-red-600">
                                     <XCircle className="h-3.5 w-3.5" />
-                                    Failed Orders ({failedOrders.length})
+                                    Failed Orders ({failedOrdersForUpload.length})
                                   </h4>
                                   <div className="space-y-2">
-                                    {failedOrders.map((order) => (
+                                    {failedOrdersForUpload.map((order) => (
                                       <div key={order.id} className="bg-red-50 border border-red-200 rounded p-3">
                                         <div className="space-y-3">
                                           {/* Order Header with Actions */}
@@ -886,7 +1225,7 @@ const QueueView = () => {
                                 </div>
                               )}
                               
-                              {successfulOrders.length === 0 && failedOrders.length === 0 && (
+                              {successfulOrders.length === 0 && failedOrdersForUpload.length === 0 && (
                                 <div className="text-center py-4 text-muted-foreground text-xs">
                                   No order results yet
                                 </div>
@@ -899,7 +1238,8 @@ const QueueView = () => {
                   );
                 })}
               </TableBody>
-            </Table>
+              </Table>
+            </div>
           )}
         </div>
           </TabsContent>
@@ -911,16 +1251,23 @@ const QueueView = () => {
               <div className="overflow-x-auto">
                 {failedOrdersLoading && isFailedOrdersInitialLoad ? (
                   <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                ) : failedOrders.length === 0 ? (
+                ) : filteredAndSortedFailedOrders.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">No failed orders found</div>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-10">
+                  <div className="border-[1px] rounded-md overflow-hidden bg-white">
+                    <Table className="border-0">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-10">
                           <Checkbox
-                            checked={selectedOrderIds.size === failedOrders.length && failedOrders.length > 0}
-                            onCheckedChange={toggleSelectAll}
+                            checked={selectedOrderIds.size === filteredAndSortedFailedOrders.length && filteredAndSortedFailedOrders.length > 0 && filteredAndSortedFailedOrders.every(o => selectedOrderIds.has(o.id))}
+                            onCheckedChange={(checked) => {
+                              if (checked) {
+                                setSelectedOrderIds(new Set(filteredAndSortedFailedOrders.map(o => o.id)));
+                              } else {
+                                setSelectedOrderIds(new Set());
+                              }
+                            }}
                           />
                         </TableHead>
                         <TableHead className="w-10"></TableHead>
@@ -935,7 +1282,7 @@ const QueueView = () => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {failedOrders.map((order) => {
+                      {filteredAndSortedFailedOrders.map((order) => {
                         const isExpanded = expandedFailedOrders.has(order.id);
                         const isSelected = selectedOrderIds.has(order.id);
                         
@@ -1070,37 +1417,57 @@ const QueueView = () => {
                           </React.Fragment>
                         );
                       })}
-                    </TableBody>
-                  </Table>
+                      </TableBody>
+                    </Table>
+                  </div>
                 )}
               </div>
             </div>
           </TabsContent>
 
           <TabsContent value="completed">
-            {/* Completed Orders View */}
+            {/* Sync'd Orders View */}
             <div className="space-y-4">
-              {/* Completed Orders Table */}
+              {/* Sync'd Orders Table */}
               <div className="overflow-x-auto">
                 {completedOrdersLoading && isCompletedOrdersInitialLoad ? (
                   <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                ) : completedOrders.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">No completed orders found</div>
+                ) : filteredAndSortedCompletedOrders.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">No sync'd orders found</div>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-12"></TableHead>
-                        <TableHead>Order</TableHead>
-                        <TableHead>Customer</TableHead>
-                        <TableHead>PO #</TableHead>
-                        <TableHead>Open in Cin7</TableHead>
-                        <TableHead>Source Upload</TableHead>
-                        <TableHead>Completed At</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {completedOrders.map((order) => {
+                  <div className="border-[1px] rounded-md overflow-hidden bg-white">
+                    <Table className="border-0">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-12 text-center">Reviewed</TableHead>
+                          <TableHead>Order</TableHead>
+                          <TableHead>Customer</TableHead>
+                          <TableHead>PO #</TableHead>
+                          <TableHead>
+                            <button
+                              onClick={() => {
+                                if (dateSortDirection === null) {
+                                  setDateSortDirection('desc');
+                                } else if (dateSortDirection === 'desc') {
+                                  setDateSortDirection('asc');
+                                } else {
+                                  setDateSortDirection(null);
+                                }
+                              }}
+                              className="flex items-center gap-1 hover:opacity-70 transition-opacity text-left"
+                            >
+                              Completed At
+                              {dateSortDirection === 'asc' && <ArrowUp className="h-3 w-3" />}
+                              {dateSortDirection === 'desc' && <ArrowDown className="h-3 w-3" />}
+                            </button>
+                          </TableHead>
+                          <TableHead>Open in Cin7</TableHead>
+                          <TableHead>Source Upload</TableHead>
+                          <TableHead>Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                      {filteredAndSortedCompletedOrders.map((order) => {
                         const isExpanded = expandedCompletedOrders.has(order.id);
                         // Extract customer and PO from sale_payload if not in order data
                         const customerName = order.customer_name || 
@@ -1112,85 +1479,47 @@ const QueueView = () => {
                         
                         return (
                           <React.Fragment key={order.id}>
-                            <TableRow className="cursor-pointer hover:bg-muted/50">
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
-                                {isExpanded ? (
-                                  <ChevronDown className="h-4 w-4" />
-                                ) : (
-                                  <ChevronRight className="h-4 w-4" />
-                                )}
+                            <TableRow className="hover:bg-muted/50">
+                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center">
+                                <button
+                                  onClick={() => markOrderAsReviewed(order.id, !order.reviewed)}
+                                  className="hover:opacity-80 transition-opacity inline-flex items-center justify-center"
+                                  title={order.reviewed ? "Mark as unreviewed" : "Mark as reviewed"}
+                                >
+                                  {order.reviewed ? (
+                                    <div className="h-4 w-4 rounded-full bg-green-500 flex items-center justify-center">
+                                      <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
+                                    </div>
+                                  ) : (
+                                    <Circle className="h-4 w-4 text-gray-400" />
+                                  )}
+                                </button>
                               </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
+                              <TableCell>
                                 <span className="font-medium">{order.order_key}</span>
                               </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
+                              <TableCell>
                                 {customerName}
                               </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
+                              <TableCell>
                                 {poNumber}
                               </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
+                              <TableCell>
+                                {formatDate(order.processed_at)}
+                              </TableCell>
+                              <TableCell>
                                 {order.sale_id ? (
                                   <a
                                     href={`https://inventory.dearsystems.com/Sale#${order.sale_id}`}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    onClick={(e) => e.stopPropagation()}
                                     className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
                                   >
                                     Open in Cin7
                                   </a>
                                 ) : '-'}
                               </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
+                              <TableCell>
                                 {order.upload ? (
                                   <div className="text-xs">
                                     <div className="font-medium">{order.upload.filename}</div>
@@ -1198,54 +1527,52 @@ const QueueView = () => {
                                   </div>
                                 ) : '-'}
                               </TableCell>
-                              <TableCell onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}>
-                                {formatDate(order.processed_at)}
+                              <TableCell>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => {
+                                      const newExpanded = new Set(expandedCompletedOrders);
+                                      if (newExpanded.has(order.id)) {
+                                        newExpanded.delete(order.id);
+                                      } else {
+                                        newExpanded.add(order.id);
+                                      }
+                                      setExpandedCompletedOrders(newExpanded);
+                                    }}
+                                    className="h-7 text-xs px-0"
+                                  >
+                                    {isExpanded ? 'Hide Details' : 'See Details'}
+                                  </Button>
+                                  {(order.sale_payload || order.sale_order_payload || order.what_is_needed || order.order_data) && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setViewingOrderPayload(order);
+                                        setJsonModalOpen(true);
+                                      }}
+                                      className="h-7 w-7 p-0"
+                                      title="View JSON payloads (dev)"
+                                    >
+                                      <Code className="h-3 w-3 text-muted-foreground" />
+                                    </Button>
+                                  )}
+                                </div>
                               </TableCell>
                             </TableRow>
                             {isExpanded && (
                               <TableRow>
                                 <TableCell colSpan={8} className="bg-muted/30">
                                   <div className="p-4 space-y-4">
-                                    {/* Order Header with Actions */}
-                                    <div className="flex items-center justify-between mb-2">
-                                      <div>
-                                        <div className="font-semibold text-sm mb-2 text-green-600">✓ Successfully Created in Cin7</div>
-                                      </div>
-                                      <div className="flex items-center gap-1">
-                                        {(order.sale_payload || order.sale_order_payload || order.what_is_needed || order.order_data) && (
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setViewingOrderPayload(order);
-                                              setJsonModalOpen(true);
-                                            }}
-                                            className="h-7 w-7 p-0"
-                                            title="View JSON payloads (dev)"
-                                          >
-                                            <Code className="h-3 w-3 text-muted-foreground" />
-                                          </Button>
-                                        )}
-                                      </div>
-                                    </div>
 
                                     {/* Order Details - reuse existing renderPayloadTable */}
                                     {(order.sale_payload || order.sale_order_payload) && (
-                                      <div>
-                                        <div className="font-semibold text-sm mb-2">Created Payload</div>
-                                        <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                                          {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
-                                          {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
-                                        </div>
+                                      <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                                        {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
+                                        {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
                                       </div>
                                     )}
 
@@ -1256,8 +1583,9 @@ const QueueView = () => {
                           </React.Fragment>
                         );
                       })}
-                    </TableBody>
-                  </Table>
+                      </TableBody>
+                    </Table>
+                  </div>
                 )}
               </div>
             </div>
@@ -1271,15 +1599,17 @@ const QueueView = () => {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Code className="h-5 w-5" />
-              Order Payload Details
+              {viewingOrderPayload?.order_results && Array.isArray(viewingOrderPayload.order_results) ? 'Upload API Logs' : 'Order Payload Details'}
             </DialogTitle>
             <DialogDescription>
-              {viewingOrderPayload?.order_data?.attempted_send === false 
-                ? "Prepared payloads (not sent to Cin7)" 
-                : "Payloads sent to Cin7"}
+              {viewingOrderPayload?.order_results && Array.isArray(viewingOrderPayload.order_results)
+                ? `API logs for upload: ${viewingOrderPayload.upload?.filename || 'N/A'}`
+                : viewingOrderPayload?.order_data?.attempted_send === false 
+                  ? "Prepared payloads (not sent to Cin7)" 
+                  : "Payloads sent to Cin7"}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex-1 overflow-auto space-y-6 p-4">
+          <div className="flex-1 overflow-auto space-y-6">
             {viewingOrderPayload?.order_data?.attempted_send === false && (
               <div className="p-3 bg-yellow-50 rounded border border-yellow-200 text-sm text-yellow-800">
                 <strong>Note:</strong> These payloads were not sent to Cin7 because the customer was not found.
@@ -1413,8 +1743,46 @@ const QueueView = () => {
             {/* Helper function to render payload as JSON */}
             {(() => {
               const renderPayloadJson = (payload, title) => {
-                if (!payload || typeof payload !== 'object') return null;
+                if (!payload) return null;
                 
+                // If payload is a string (raw JSON), format it while preserving order
+                if (typeof payload === 'string') {
+                  try {
+                    // Parse and stringify to format, but JavaScript preserves object key order (ES2015+)
+                    const parsed = JSON.parse(payload);
+                    const formatted = JSON.stringify(parsed, null, 2);
+                    return (
+                      <div className="space-y-2">
+                        {title && <div className="text-sm font-semibold text-gray-700">{title}</div>}
+                        <div className="border rounded-md overflow-hidden">
+                          <div className="p-4 bg-gray-50">
+                            <pre className="text-xs overflow-auto max-h-96 whitespace-pre-wrap break-words font-mono">
+                              {formatted}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  } catch (e) {
+                    // If parsing fails, display as string
+                    return (
+                      <div className="space-y-2">
+                        {title && <div className="text-sm font-semibold text-gray-700">{title}</div>}
+                        <div className="border rounded-md overflow-hidden">
+                          <div className="p-4 bg-gray-50">
+                            <pre className="text-xs overflow-auto max-h-96 whitespace-pre-wrap break-words font-mono">
+                              {payload}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+                }
+                
+                if (typeof payload !== 'object') return null;
+                
+                // For objects, stringify with formatting (JavaScript preserves key order)
                 return (
                   <div className="space-y-2">
                     {title && <div className="text-sm font-semibold text-gray-700">{title}</div>}
@@ -1457,10 +1825,6 @@ const QueueView = () => {
                 <>
                   {/* API Logs from Database - Primary source of truth */}
                   <div className="space-y-4">
-                    <div className="text-base font-semibold text-gray-800 border-b pb-2">
-                      API Calls (from Database)
-                      {loadingApiLogs && <span className="text-sm text-gray-500 ml-2">(Loading...)</span>}
-                    </div>
                     {loadingApiLogs ? (
                       <div className="text-sm text-gray-500">Loading API logs...</div>
                     ) : apiLogs.length > 0 ? (
@@ -1571,11 +1935,6 @@ const QueueView = () => {
                 </>
               );
             })()}
-          </div>
-          <div className="flex justify-end gap-2 pt-4 border-t">
-            <Button onClick={() => setJsonModalOpen(false)}>
-              Close
-            </Button>
           </div>
         </DialogContent>
       </Dialog>

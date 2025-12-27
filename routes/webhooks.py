@@ -523,16 +523,39 @@ def process_single_order(
         # Step 1: Create Sale first
         logger.info(f"Creating Sale for order {order_key}...")
         sale_success, sale_message, sale_response = api_client.create_sale(sale_data)
-        sale_api_response = sale_response if sale_response else None
         sale_id = None
+        sale_data_from_response = None
+        sale_api_response = None
         
-        # Extract Sale ID from response
+        # Extract Sale ID, full Sale object, and raw JSON text from response
         if isinstance(sale_response, dict):
             sale_id = sale_response.get('ID')
+            sale_data_from_response = sale_response.copy() if sale_response else None  # Copy for TaxRule lookup
+            # Extract raw JSON text if available (preserves exact order)
+            sale_api_response_raw = sale_response.get('_raw_json_text')
+            if sale_api_response_raw:
+                # Use raw JSON text to preserve exact order
+                sale_api_response = sale_api_response_raw
+                # Remove _raw_json_text from the copy used for TaxRule lookup
+                if sale_data_from_response and '_raw_json_text' in sale_data_from_response:
+                    del sale_data_from_response['_raw_json_text']
+            else:
+                # No raw text available, use parsed dict
+                sale_api_response = sale_response
         elif isinstance(sale_response, list) and len(sale_response) > 0:
             first_item = sale_response[0] if isinstance(sale_response[0], dict) else None
             if first_item:
                 sale_id = first_item.get('ID')
+                sale_data_from_response = first_item.copy() if first_item else None  # Copy for TaxRule lookup
+                # Extract raw JSON text if available
+                sale_api_response_raw = first_item.get('_raw_json_text')
+                if sale_api_response_raw:
+                    sale_api_response = sale_api_response_raw
+                    # Remove _raw_json_text from the copy used for TaxRule lookup
+                    if sale_data_from_response and '_raw_json_text' in sale_data_from_response:
+                        del sale_data_from_response['_raw_json_text']
+                else:
+                    sale_api_response = first_item
         
         if not sale_success:
             # Enhance error message with matching details
@@ -591,26 +614,37 @@ def process_single_order(
                 'order_data': order_result.order_data
             }
         
-        # Step 2: Get customer and sale data for TaxRule lookup (needed for sale order)
-        sale_data_from_api = None
-        if sale_id:
-            try:
-                sale_data_from_api = api_client.get_sale(str(sale_id))
-            except Exception as sale_lookup_error:
-                logger.warning(f"Warning: Could not retrieve Sale data for TaxRule: {str(sale_lookup_error)}")
-        
-        # Step 3: Build and create Sale Order with the Sale ID
+        # Step 2: Build and create Sale Order with the Sale ID
         logger.info(f"Creating Sale Order for order {order_key} with Sale ID {sale_id}...")
         
         # Build sale order payload
+        # Use sale_data_from_response (from create_sale response) for TaxRule lookup
         if len(order_rows) > 1:
-            sale_order_data = builder.build_sale_order_from_rows(order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_api)
+            sale_order_data = builder.build_sale_order_from_rows(order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
         else:
-            sale_order_data = builder.build_sale_order(order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_api)
+            sale_order_data = builder.build_sale_order(order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
         
         # Create Sale Order via API
         so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
-        sale_order_api_response = so_response if so_response else None
+        sale_order_api_response = None
+        
+        # Extract raw JSON text if available to preserve exact order
+        if isinstance(so_response, dict):
+            sale_order_api_response_raw = so_response.get('_raw_json_text')
+            if sale_order_api_response_raw:
+                sale_order_api_response = sale_order_api_response_raw
+            else:
+                sale_order_api_response = so_response
+        elif isinstance(so_response, list) and len(so_response) > 0:
+            first_item = so_response[0] if isinstance(so_response[0], dict) else None
+            if first_item:
+                sale_order_api_response_raw = first_item.get('_raw_json_text')
+                if sale_order_api_response_raw:
+                    sale_order_api_response = sale_order_api_response_raw
+                else:
+                    sale_order_api_response = first_item
+        else:
+            sale_order_api_response = so_response
         sale_order_id = None
         
         # Extract Sale Order ID from response
@@ -686,22 +720,12 @@ def process_single_order(
             delay = settings.get('default_delay_between_orders', 0.7)
             time.sleep(delay)
             
-            # Get Sale data to extract TaxRule (if available)
-            sale_data_from_api = None
-            if api_client:
-                try:
-                    sale_data_from_api = api_client.get_sale(str(sale_id))
-                    if sale_data_from_api:
-                        logger.info(f"Retrieved Sale data for TaxRule lookup - TaxRule: {sale_data_from_api.get('TaxRule')}")
-                except Exception as sale_lookup_error:
-                    logger.warning(f"Could not retrieve Sale data for TaxRule lookup: {str(sale_lookup_error)}")
-            
             # Step 2: Build and create Sale Order
             # Note: sale_order_data was already built above for "what_is_needed", but rebuild with actual sale_id
-            # Pass customer_data and sale_data so builder can extract TaxRule
+            # TaxRule comes from customer_data or settings - no need to GET the Sale
             logger.info(f"Step 2: Building Sale Order for order {order_key} with sale_id {sale_id}")
             row_data_list = order_rows
-            sale_order_data = builder.build_sale_order_from_rows(row_data_list, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_api)
+            sale_order_data = builder.build_sale_order_from_rows(row_data_list, column_mapping, str(sale_id), customer_data=customer_data)
             
             logger.info(f"Sale Order payload built for order {order_key}: SaleID={sale_order_data.get('SaleID')}, Lines count={len(sale_order_data.get('Lines', []))}, Total={sale_order_data.get('Total')}")
             
@@ -711,8 +735,24 @@ def process_single_order(
             logger.info(f"Sale Order API call result for order {order_key}: success={so_success}, message={so_message}")
             logger.info(f"Sale Order response type: {type(so_response)}, response: {so_response}")
             
-            # Store API responses for display
-            sale_order_api_response = so_response if so_response else None
+            # Store API responses for display - use raw JSON text if available to preserve exact order
+            sale_order_api_response = None
+            if isinstance(so_response, dict):
+                sale_order_api_response_raw = so_response.get('_raw_json_text')
+                if sale_order_api_response_raw:
+                    sale_order_api_response = sale_order_api_response_raw
+                else:
+                    sale_order_api_response = so_response
+            elif isinstance(so_response, list) and len(so_response) > 0:
+                first_item = so_response[0] if isinstance(so_response[0], dict) else None
+                if first_item:
+                    sale_order_api_response_raw = first_item.get('_raw_json_text')
+                    if sale_order_api_response_raw:
+                        sale_order_api_response = sale_order_api_response_raw
+                    else:
+                        sale_order_api_response = first_item
+            else:
+                sale_order_api_response = so_response if so_response else None
             
             if so_success:
                 sale_order_id = None
@@ -991,6 +1031,19 @@ def process_webhook_csv(
                      response_status, response_body, error_message, duration_ms):
         """Callback to log API calls to database"""
         try:
+            # If response_body is a string (raw JSON), store it in raw_response_body_text
+            # and parse it for response_body column
+            raw_response_text = None
+            parsed_response_body = response_body
+            if isinstance(response_body, str):
+                raw_response_text = response_body
+                try:
+                    import json
+                    parsed_response_body = json.loads(response_body)
+                except (json.JSONDecodeError, TypeError):
+                    # If parsing fails, keep as string
+                    parsed_response_body = response_body
+            
             try:
                 log_entry = Cin7ApiLog(
                     id=uuid.uuid4(),
@@ -1004,7 +1057,8 @@ def process_webhook_csv(
                     request_headers=request_headers,
                     request_body=request_body,
                     response_status=response_status,
-                    response_body=response_body,
+                    response_body=parsed_response_body,
+                    raw_response_body_text=raw_response_text,
                     error_message=error_message,
                     duration_ms=duration_ms
                 )
@@ -1025,7 +1079,8 @@ def process_webhook_csv(
                         request_headers=request_headers,
                         request_body=request_body,
                         response_status=response_status,
-                        response_body=response_body,
+                        response_body=parsed_response_body,
+                        raw_response_body_text=raw_response_text,
                         error_message=error_message,
                         duration_ms=duration_ms
                     )
@@ -1626,15 +1681,9 @@ def get_order_api_logs(order_result_id):
         # Format response
         logs_data = []
         for log in logs:
-            # Parse response_body if it's a string (JSON stored as text)
-            response_body = log.response_body
-            if isinstance(response_body, str):
-                try:
-                    import json
-                    response_body = json.loads(response_body)
-                except (json.JSONDecodeError, TypeError):
-                    # Keep as string if not valid JSON
-                    pass
+            # Use raw_response_body_text if available (preserves exact key order)
+            # Otherwise fall back to response_body (parsed, may have reordered keys)
+            response_body = log.raw_response_body_text if log.raw_response_body_text else log.response_body
             
             # Parse request_body if it's a string
             request_body = log.request_body
@@ -1986,6 +2035,7 @@ def get_completed_orders():
                 'sale_id': str(order_result.sale_id) if order_result.sale_id else None,
                 'sale_order_id': str(order_result.sale_order_id) if order_result.sale_order_id else None,
                 'retry_count': order_result.retry_count or 0,
+                'reviewed': order_result.reviewed if order_result.reviewed is not None else False,
                 'upload': {
                     'id': str(upload.id) if upload else None,
                     'filename': upload.filename if upload else None,
@@ -2009,6 +2059,83 @@ def get_completed_orders():
     
     except Exception as e:
         logger.error(f"Error getting completed orders: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
+@webhooks_bp.route('/orders/completed/unreviewed-count', methods=['GET'])
+@jwt_required()
+def get_unreviewed_completed_orders_count():
+    """
+    Get count of unreviewed completed orders.
+    Used for the badge count in the UI.
+    """
+    try:
+        # Get query parameters
+        client_id = request.args.get('client_id')
+        
+        # Build query for unreviewed completed orders
+        query = SalesOrderResult.query.filter_by(status='success', reviewed=False)
+        
+        # Filter by client_id if provided
+        if client_id:
+            try:
+                client_uuid = uuid.UUID(client_id)
+                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_id == client_uuid)
+            except ValueError:
+                return jsonify({'error': 'Invalid client_id format'}), 400
+        
+        # Get count
+        count = query.count()
+        
+        return jsonify({
+            'unreviewed_count': count
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error getting unreviewed count: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
+@webhooks_bp.route('/orders/<order_id>/review', methods=['POST'])
+@jwt_required()
+def mark_order_as_reviewed(order_id):
+    """
+    Mark a completed order as reviewed or unreviewed.
+    Accepts a 'reviewed' boolean in the request body.
+    """
+    try:
+        user_id = get_jwt_identity()
+        if not user_id:
+            return jsonify({'error': 'Invalid user ID'}), 400
+        
+        # Get request data
+        data = request.get_json() or {}
+        reviewed = data.get('reviewed', True)  # Default to True for backward compatibility
+        
+        # Get order
+        order_result = SalesOrderResult.query.get(uuid.UUID(order_id))
+        if not order_result:
+            return jsonify({'error': 'Order not found'}), 404
+        
+        # Only allow marking successful orders as reviewed/unreviewed
+        if order_result.status != 'success':
+            return jsonify({'error': 'Only completed orders can be marked as reviewed'}), 400
+        
+        # Update reviewed status
+        order_result.reviewed = reviewed
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Order marked as {"reviewed" if reviewed else "unreviewed"}',
+            'reviewed': reviewed
+        }), 200
+    
+    except ValueError:
+        return jsonify({'error': 'Invalid order ID format'}), 400
+    except Exception as e:
+        logger.error(f"Error updating order reviewed status: {str(e)}", exc_info=True)
+        db.session.rollback()
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 

@@ -9,6 +9,7 @@ import Admin from './components/Admin';
 import CsvMappingConfig from './components/CsvMappingConfig';
 import Cin7Settings from './components/Cin7Settings';
 import QueueView from './components/QueueView';
+import DataView from './components/DataView';
 import { SidebarProvider, SidebarTrigger, SidebarInset } from './components/ui/sidebar';
 import { AppSidebar } from './components/AppSidebar';
 import { ClientProvider, useClient } from './contexts/ClientContext';
@@ -66,8 +67,9 @@ function ActivityLogSidebar() {
     }
   }, [terminalLines, showActivityLog]);
   
-  // Only show on home page
-  if (location.pathname !== '/') {
+  // Show on home, queue, upload, and data pages
+  const showOnPage = location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/upload' || location.pathname === '/data';
+  if (!showOnPage) {
     return null;
   }
 
@@ -122,11 +124,14 @@ function ActivityLogSidebar() {
   );
 }
 
-function AppHeaderContent() {
+function AppHeaderContent({ user }) {
   const location = useLocation();
   const { showActivityLog, setShowActivityLog } = useActivityLog();
   const { connected, credentials, testConnection } = useConnection();
   const { selectedClient } = useClient();
+  
+  // Check if user is admin
+  const isAdmin = user && (user.role === 'admin' || user.email === 'dan@paleblue.nyc');
 
   const getPageTitle = () => {
     if (location.pathname === '/admin') {
@@ -137,6 +142,15 @@ function AppHeaderContent() {
     }
     if (location.pathname === '/settings/cin7') {
       return 'Cin7 Config';
+    }
+    if (location.pathname === '/data') {
+      return 'Data';
+    }
+    if (location.pathname === '/' || location.pathname === '/queue') {
+      return 'Upload Queue';
+    }
+    if (location.pathname === '/upload') {
+      return 'Cin7 Uploader';
     }
     return 'Cin7 Uploader';
   };
@@ -151,6 +165,15 @@ function AppHeaderContent() {
     if (location.pathname === '/settings/cin7') {
       return 'Configure order defaults';
     }
+    if (location.pathname === '/data') {
+      return 'View customer and product data';
+    }
+    if (location.pathname === '/' || location.pathname === '/queue') {
+      return 'View order processing results from email webhooks';
+    }
+    if (location.pathname === '/upload') {
+      return 'Upload CSV files and create sales orders in Cin7';
+    }
     return 'Upload CSV files and create sales orders in Cin7';
   };
 
@@ -162,7 +185,7 @@ function AppHeaderContent() {
         <span className="text-xs text-muted-foreground hidden md:inline">{getPageDescription()}</span>
       </nav>
       <div className="flex-1" />
-      {location.pathname === '/' && selectedClient && (
+      {(location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/upload' || location.pathname === '/data') && selectedClient && (
         <>
           {connected ? (
             <div className="flex items-center gap-2">
@@ -182,7 +205,7 @@ function AppHeaderContent() {
           )}
         </>
       )}
-      {location.pathname === '/' && !showActivityLog && (
+      {((location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/upload' || location.pathname === '/data') || isAdmin) && !showActivityLog && (
         <Button
           variant="ghost"
           size="icon"
@@ -338,11 +361,13 @@ function AppContent() {
               <AppSidebar user={user} onLogout={handleLogout} />
               <div className="flex flex-1 min-w-0">
                 <SidebarInset className="bg-white m-2 rounded-md border border-gray-200 min-w-0 shadow-sm flex-1">
-                  <AppHeaderContent />
+                  <AppHeaderContent user={user} />
                   <main className="flex flex-1 flex-col overflow-y-auto bg-white rounded-b-md min-h-0 min-w-0">
                     <Routes>
-                      <Route path="/" element={<SalesOrderUploader user={user} />} />
+                      <Route path="/" element={<QueueView />} />
+                      <Route path="/upload" element={<SalesOrderUploader user={user} />} />
                       <Route path="/queue" element={<QueueView />} />
+                      <Route path="/data" element={<DataView />} />
                       <Route path="/mappings" element={<CsvMappingConfig />} />
                       <Route path="/settings/cin7" element={<Cin7Settings />} />
                       {isAdmin ? (

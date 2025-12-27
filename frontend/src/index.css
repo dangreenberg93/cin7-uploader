@@ -145,6 +145,14 @@ input[type="date"] {
   animation-delay: 4s;
 }
 
+/* Radix UI Select placeholder styling - force light grey */
+[data-radix-select-trigger] span[data-placeholder],
+[data-radix-select-value][data-placeholder],
+span[data-placeholder],
+[data-placeholder] {
+  color: #9ca3af !important;
+}
+
 
 
 

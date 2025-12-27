@@ -10,10 +10,12 @@ const SelectValue = React.forwardRef(({ className, ...props }, ref) => (
   <SelectPrimitive.Value
     ref={ref}
     className={cn(
-      // Placeholder styling - match date filter (text-sm, muted-foreground)
-      "data-[placeholder]:text-sm data-[placeholder]:text-muted-foreground",
-      // Pill/tag style when value is selected
-      "data-[placeholder=false]:bg-blue-100 data-[placeholder=false]:dark:bg-blue-900/30 data-[placeholder=false]:text-blue-700 data-[placeholder=false]:dark:text-blue-300 data-[placeholder=false]:px-2.5 data-[placeholder=false]:py-0.5 data-[placeholder=false]:rounded-full data-[placeholder=false]:font-medium data-[placeholder=false]:inline-block data-[placeholder=false]:mr-1",
+      // Default text color
+      "text-foreground",
+      // Plain text when value is selected (no badge)
+      "data-[placeholder=false]:text-foreground",
+      // Placeholder styling - force light grey with !important
+      "data-[placeholder]:!text-gray-400",
       className
     )}
     {...props}
@@ -25,19 +27,18 @@ const SelectTrigger = React.forwardRef(({ className, children, ...props }, ref) 
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-10 w-full items-center justify-between rounded-md border border-input bg-transparent px-4 py-2 text-xs ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50 hover:bg-muted/50 transition-colors",
-      // Style the value when selected
-      "[&:not([data-placeholder])>span]:bg-blue-100 [&:not([data-placeholder])>span]:dark:bg-blue-900/30 [&:not([data-placeholder])>span]:text-blue-700 [&:not([data-placeholder])>span]:dark:text-blue-300 [&:not([data-placeholder])>span]:px-2.5 [&:not([data-placeholder])>span]:py-0.5 [&:not([data-placeholder])>span]:rounded-full [&:not([data-placeholder])>span]:font-medium [&:not([data-placeholder])>span]:inline-block [&:not([data-placeholder])>span]:mr-1",
-      // Placeholder text - match date filter (text-sm, muted-foreground)
-      "[&[data-placeholder]>span]:text-sm [&[data-placeholder]>span]:text-muted-foreground",
-      "[&>span]:line-clamp-1 [&>span]:pr-6",
+      "flex h-10 w-full items-center justify-between rounded-md border border-input bg-transparent px-4 py-2 text-xs ring-offset-background focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50 hover:bg-muted/50 transition-colors relative pr-10",
+      // Plain text styling (no badge)
+      "[&>span]:line-clamp-1 [&>span]:pr-0",
+      // Placeholder styling - force light grey with !important
+      "[&>span[data-placeholder]]:!text-gray-400",
       className
     )}
     {...props}
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="h-3.5 w-3.5 opacity-40" />
+      <ChevronDown className="h-3.5 w-3.5 opacity-40 absolute right-3" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ))
