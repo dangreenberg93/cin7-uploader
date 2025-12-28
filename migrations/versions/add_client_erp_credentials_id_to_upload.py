@@ -29,23 +29,12 @@ def upgrade():
                     ['client_erp_credentials_id'],
                     schema='cin7_uploader')
     
-    # Add foreign key constraint
-    op.create_foreign_key(
-        'fk_sales_order_upload_client_erp_credentials_id',
-        'sales_order_upload', 'client_erp_credentials',
-        ['client_erp_credentials_id'], ['id'],
-        source_schema='cin7_uploader',
-        referent_schema='voyager'
-    )
+    # Note: No foreign key constraint - client_erp_credentials is in voyager schema
+    # Cross-schema foreign keys can cause issues, so we rely on application-level validation
+    # This matches the pattern used in ClientCsvMapping, CachedCustomer, and CachedProduct
 
 
 def downgrade():
-    # Remove foreign key constraint
-    op.drop_constraint('fk_sales_order_upload_client_erp_credentials_id', 
-                      'sales_order_upload', 
-                      type_='foreignkey',
-                      schema='cin7_uploader')
-    
     # Remove index
     op.drop_index('ix_sales_order_upload_client_erp_credentials_id', 
                   'sales_order_upload',

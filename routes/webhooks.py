@@ -1,15 +1,18 @@
 """Webhook routes for email automation"""
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response, stream_with_context
 from flask_jwt_extended import jwt_required, get_jwt_identity
 import logging
 import requests
 import uuid
 import time
 import threading
+import queue
 import os
+import re
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
-from database import db, SalesOrderUpload, SalesOrderResult, ClientSettings, ClientCsvMapping, Cin7ApiLog, Client
+from database import db, SalesOrderUpload, SalesOrderResult, ClientSettings, ClientCsvMapping, Cin7ApiLog, Client, UserClient
 from cin7_sales.api_client import Cin7SalesAPI
 from cin7_sales.csv_parser import CSVParser
 from cin7_sales.validator import SalesOrderValidator
@@ -19,6 +22,30 @@ from routes.auth import User
 
 webhooks_bp = Blueprint('webhooks', __name__)
 logger = logging.getLogger(__name__)
+
+# Global event queue for Server-Sent Events (SSE)
+# Thread-safe queue to broadcast upload status updates to connected clients
+_event_queue = queue.Queue()
+
+def emit_upload_event(event_type: str, upload_id: str = None, client_id: str = None):
+    """
+    Emit an event to all connected SSE clients when upload status changes.
+    
+    Args:
+        event_type: Type of event ('upload_status_changed', 'order_processed', etc.)
+        upload_id: Optional upload ID
+        client_id: Optional client ID
+    """
+    try:
+        event_data = {
+            'type': event_type,
+            'upload_id': upload_id,
+            'client_id': client_id,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        _event_queue.put(event_data)
+    except Exception as e:
+        logger.error(f"Error emitting upload event: {e}")
 
 
 def extract_client_name_from_subject(subject: str) -> Optional[str]:
@@ -340,6 +367,14 @@ def process_single_order(
         db.session.add(order_result)
     db.session.commit()
     
+    # Capture order_id for logger callback
+    order_result_id = order_result.id
+    
+    # Set the current order_id in the logger callback closure
+    # The logger callback uses a mutable list (current_order_id) to store order_id
+    if hasattr(api_client, '_current_order_id_ref'):
+        api_client._current_order_id_ref[0] = order_result_id
+    
     # Extract order data snapshot - include all mapped columns from all rows
     primary_row = order_rows[0] if order_rows else {}
     
@@ -362,6 +397,9 @@ def process_single_order(
             if csv_column and csv_column in row:
                 row_data[csv_column] = row[csv_column]
         order_data['all_rows'].append(row_data)
+    
+    # Store column mapping so frontend can use it to find columns
+    order_data['column_mapping'] = column_mapping
     
     # Keep backward compatibility with old field names
     order_data['customer_name'] = primary_row.get('CustomerName') or primary_row.get('customer_name', '') or order_data.get('customername', '')
@@ -490,9 +528,90 @@ def process_single_order(
         what_is_needed['_sale_payload'] = sale_data  # Store the sale payload
         what_is_needed['_sale_order_payload'] = sale_order_for_what_is_needed  # Store the sale order payload
         
+        # Check for duplicate PO number before creating sale
+        customer_reference = sale_data.get('CustomerReference', '').strip() if sale_data.get('CustomerReference') else None
+        duplicate_sales = []
+        existing_sales = []  # Initialize to ensure it's in scope
+        if customer_reference:
+            logger.info(f"Checking for duplicate PO number: {customer_reference}")
+            search_success, search_message, existing_sales = api_client.search_sales_by_po(customer_reference)
+            if search_success and existing_sales:
+                # Filter out voided sales (voided sales shouldn't block new orders)
+                # Also handle case-insensitive matching and None/empty status
+                active_duplicates = [
+                    s for s in existing_sales 
+                    if s.get('Status') and str(s.get('Status', '')).strip().upper() != 'VOIDED'
+                ]
+                if active_duplicates:
+                    duplicate_sales = active_duplicates
+                    logger.warning(f"Found {len(duplicate_sales)} existing non-voided sale(s) with PO number {customer_reference} (filtered out {len(existing_sales) - len(duplicate_sales)} voided sale(s))")
+        
         # Check if we should even attempt to send to Cin7
         # CustomerID is required - if we don't have it, don't send
         should_attempt_sale = 'CustomerID' in sale_data and sale_data.get('CustomerID')
+        
+        # Block if duplicate PO found
+        if duplicate_sales:
+            # Format error message: "Order SO-0003 exists in Cin7 under PO # XYZ"
+            if len(duplicate_sales) == 1:
+                order_num = duplicate_sales[0].get('OrderNumber', 'N/A')
+                enhanced_error = f'Order {order_num} exists in Cin7 under PO # {customer_reference}'
+            else:
+                order_nums = ', '.join([s.get('OrderNumber', 'N/A') for s in duplicate_sales[:3]])
+                if len(duplicate_sales) > 3:
+                    order_nums += f' (and {len(duplicate_sales) - 3} more)'
+                enhanced_error = f'Orders {order_nums} exist in Cin7 under PO # {customer_reference}'
+            
+            logger.error(enhanced_error)
+            
+            # Get the API response from the search (stored in order_data for dev modal)
+            # The API call is already logged via logger_callback, but we'll also store the response here
+            duplicate_search_response = {
+                'search_query': customer_reference,
+                'total_found': len(existing_sales),
+                'active_duplicates': len(duplicate_sales),
+                'voided_filtered': len(existing_sales) - len(duplicate_sales),
+                'duplicate_sales': duplicate_sales,
+                'all_sales_found': existing_sales  # Include all sales (including voided) for reference
+            }
+            
+            # Create order result with duplicate error
+            order_result = SalesOrderResult(
+                id=uuid.uuid4(),
+                upload_id=upload_id,
+                order_key=order_key,
+                row_numbers=row_numbers,
+                status='failed',
+                error_message=enhanced_error,
+                error_type='duplicate_po',
+                order_data={
+                    'attempted_send': False,
+                    'error': enhanced_error,
+                    'po_number': customer_reference,
+                    'duplicate_search_response': duplicate_search_response,
+                    'duplicate_sales': [
+                        {
+                            'order_number': s.get('OrderNumber'),
+                            'status': s.get('Status'),
+                            'invoice_number': s.get('InvoiceNumber'),
+                            'customer': s.get('Customer'),
+                            'sale_id': s.get('ID')  # Store full sale object if available
+                        }
+                        for s in duplicate_sales[:5]  # Limit to first 5 for storage
+                    ],
+                    'matching_details': matching_details,
+                    'sale_payload': sale_data,
+                    'sale_order_payload': sale_order_for_what_is_needed
+                }
+            )
+            db.session.add(order_result)
+            db.session.commit()
+            return {
+                'status': 'failed',
+                'error': enhanced_error,
+                'error_type': 'duplicate_po',
+                'order_result_id': str(order_result.id)
+            }
         
         if not should_attempt_sale:
             # Don't send to Cin7 - customer not matched
@@ -617,14 +736,89 @@ def process_single_order(
         # Step 2: Build and create Sale Order with the Sale ID
         logger.info(f"Creating Sale Order for order {order_key} with Sale ID {sale_id}...")
         
-        # Build sale order payload
-        # Use sale_data_from_response (from create_sale response) for TaxRule lookup
-        if len(order_rows) > 1:
-            sale_order_data = builder.build_sale_order_from_rows(order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
-        else:
-            sale_order_data = builder.build_sale_order(order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
+        # Track unmatched products BEFORE building the sale order
+        # Filter out unmatched products and update matching_details
+        sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
+        filtered_order_rows = []
+        removed_products = []
         
-        # Create Sale Order via API
+        if sku_col:
+            for row in order_rows:
+                sku = str(row.get(sku_col, '')).strip()
+                if sku:
+                    # Check if product exists in cached/preloaded data
+                    product = builder._lookup_product_by_sku(sku)
+                    if product and product.get('ID'):
+                        # Product found - include in order
+                        filtered_order_rows.append(row)
+                    else:
+                        # Product not found - exclude from order and track it
+                        removed_products.append({
+                            'sku': sku,
+                            'row_data': row
+                        })
+                        logger.warning(f"Product SKU '{sku}' not found in Cin7 - excluding from order {order_key}")
+                        
+                        # Update matching_details to mark this product as not found
+                        if 'products' not in matching_details:
+                            matching_details['products'] = []
+                        
+                        # Check if already in matching_details
+                        found_in_details = any(p.get('sku') == sku for p in matching_details['products'])
+                        if not found_in_details:
+                            matching_details['products'].append({
+                                'sku': sku,
+                                'found': False,
+                                'error': f'Product SKU "{sku}" not found in Cin7'
+                            })
+                        else:
+                            # Update existing entry
+                            for product in matching_details['products']:
+                                if product.get('sku') == sku:
+                                    product['found'] = False
+                                    product['error'] = f'Product SKU "{sku}" not found in Cin7'
+                                    break
+                else:
+                    # No SKU - include row (will be handled by validation)
+                    filtered_order_rows.append(row)
+        else:
+            # No SKU column mapping - use all rows
+            filtered_order_rows = order_rows
+        
+        # Only proceed if we have at least one valid product
+        if not filtered_order_rows:
+            error_msg = 'No valid products found - all products were unmatched'
+            order_result.status = 'failed'
+            order_result.error_message = error_msg
+            order_result.error_type = categorize_error(error_msg)
+            order_result.sale_id = sale_id
+            order_result.order_data = {
+                **order_data,
+                'matching_details': matching_details,
+                'sale_payload': sale_data,
+                'removed_products': removed_products
+            }
+            order_result.processed_at = datetime.utcnow()
+            db.session.commit()
+            return {
+                'status': 'failed',
+                'error_message': error_msg,
+                'order_data': order_result.order_data,
+                'matching_details': matching_details
+            }
+        
+        # Log if any products were filtered
+        if removed_products:
+            logger.info(f"Filtered out {len(removed_products)} unmatched product(s) from order {order_key}. Proceeding with {len(filtered_order_rows)} matched product(s).")
+        
+        # Build sale order payload with filtered rows (only matched products)
+        # Use sale_data_from_response (from create_sale response) for TaxRule lookup
+        if len(filtered_order_rows) > 1:
+            sale_order_data = builder.build_sale_order_from_rows(filtered_order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
+        else:
+            sale_order_data = builder.build_sale_order(filtered_order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
+        
+        # Create Sale Order via API (should never fail with product not found since we filtered)
         so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
         sale_order_api_response = None
         
@@ -656,7 +850,7 @@ def process_single_order(
                 sale_order_id = first_item.get('ID')
         
         if not so_success:
-            # Sale was created but Sale Order failed
+            # Sale was created but Sale Order failed (should be rare now since we filter unmatched products)
             order_result.status = 'failed'
             order_result.error_message = f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}'
             order_result.error_type = categorize_error(f'Sale created but Sale Order failed: {so_message}')
@@ -668,6 +862,7 @@ def process_single_order(
                 'sale_order_payload': sale_order_data,
                 'sale_api_response': sale_api_response,
                 'sale_order_api_response': sale_order_api_response,
+                'removed_products': removed_products,  # Track which products were removed
                 'what_is_needed': what_is_needed,
                 'attempted_send': True
             }
@@ -681,7 +876,18 @@ def process_single_order(
             }
         
         # Success - both Sale and Sale Order were created
-        order_result.status = 'success'
+        # Create user-friendly message if some products were removed
+        if removed_products:
+            matched_count = len(sale_order_data.get('Lines', []))
+            missing_count = len(removed_products)
+            error_message = f'Sale created with {matched_count} line item{"s" if matched_count != 1 else ""}, {missing_count} line item{"s" if missing_count != 1 else ""} missing'
+            order_result.status = 'success'  # Still success since sale was created
+            order_result.error_message = error_message  # Store as error_message for display
+            order_result.error_type = 'partial_success'
+        else:
+            order_result.status = 'success'
+            order_result.error_message = None
+        
         order_result.sale_id = sale_id
         order_result.sale_order_id = sale_order_id if sale_order_id else None
         order_result.order_data = {
@@ -690,7 +896,9 @@ def process_single_order(
             'sale_payload': sale_data,
             'sale_order_payload': sale_order_data,
             'sale_api_response': sale_api_response,
-            'sale_order_api_response': sale_order_api_response
+            'sale_order_api_response': sale_order_api_response,
+            'removed_products': removed_products if removed_products else None,  # Track which products were removed
+            'partial_success': True if removed_products else False  # Flag to indicate some products were filtered
         }
         order_result.processed_at = datetime.utcnow()
         db.session.commit()
@@ -853,7 +1061,9 @@ def process_webhook_csv(
     upload_id: uuid.UUID,
     client_erp_credentials_id: uuid.UUID,
     csv_content: bytes,
-    filename: str
+    filename: str,
+    trigger: str = 'webhook',
+    user_id: Optional[uuid.UUID] = None
 ) -> Dict:
     """
     Process CSV from webhook: parse, validate, group orders, and process each individually.
@@ -1026,17 +1236,34 @@ def process_webhook_csv(
     
     # Create logging callback
     credential_id_for_logging = client_erp_credentials_id
+    # Capture trigger and user_id for the closure
+    captured_trigger = trigger
+    captured_user_id = user_id
+    # Use a list to store current order_id (mutable for closure)
+    current_order_id = [None]  # Use list to make it mutable in closure
     
     def log_api_call(endpoint, method, request_url, request_headers, request_body,
                      response_status, response_body, error_message, duration_ms):
         """Callback to log API calls to database"""
+        logger.info(f"log_api_call invoked: {method} {endpoint}, upload_id: {upload_id}, order_id: {current_order_id[0]}, trigger: {captured_trigger}")
         try:
-            # If response_body is a string (raw JSON), store it in raw_response_body_text
-            # and parse it for response_body column
-            raw_response_text = None
+            # Check if we're in an app context (should be true if called from background thread)
+            try:
+                from flask import has_app_context
+                if not has_app_context():
+                    logger.error("log_api_call called outside of Flask app context!")
+                    return
+            except (ImportError, AttributeError):
+                # Flask version might not have has_app_context, try accessing current_app
+                try:
+                    from flask import current_app
+                    _ = current_app.name  # Try to access to trigger RuntimeError if no context
+                except RuntimeError:
+                    logger.error("log_api_call called outside of Flask app context!")
+                    return
+            # Parse response_body if it's a string (raw JSON)
             parsed_response_body = response_body
             if isinstance(response_body, str):
-                raw_response_text = response_body
                 try:
                     import json
                     parsed_response_body = json.loads(response_body)
@@ -1045,12 +1272,17 @@ def process_webhook_csv(
                     parsed_response_body = response_body
             
             try:
+                # Use 'validation' trigger for duplicate PO checks (GET /saleList)
+                # This is a validation step, not an upload step
+                actual_trigger = 'validation' if (endpoint == '/saleList' and method == 'GET') else captured_trigger
+                
                 log_entry = Cin7ApiLog(
                     id=uuid.uuid4(),
                     client_id=credential_id_for_logging,
-                    user_id=None,  # Webhook has no user
+                    user_id=captured_user_id,  # Use captured user_id (None for webhooks, actual user_id for manual uploads)
                     upload_id=upload_id,
-                    trigger='webhook',
+                    order_id=current_order_id[0],  # Use current order_id from closure
+                    trigger=actual_trigger,  # Use 'validation' for duplicate PO checks, otherwise use captured trigger
                     endpoint=endpoint,
                     method=method,
                     request_url=request_url,
@@ -1058,47 +1290,64 @@ def process_webhook_csv(
                     request_body=request_body,
                     response_status=response_status,
                     response_body=parsed_response_body,
-                    raw_response_body_text=raw_response_text,
                     error_message=error_message,
                     duration_ms=duration_ms
                 )
                 db.session.add(log_entry)
                 db.session.commit()
+                logger.info(f"✓ Logged API call: {method} {endpoint} - Status: {response_status}, trigger: {actual_trigger}, upload_id: {upload_id}")
             except Exception as trigger_error:
                 error_str = str(trigger_error).lower()
+                logger.warning(f"Error in logger callback (first attempt): {str(trigger_error)}")
+                db.session.rollback()
                 if 'trigger' in error_str or 'column' in error_str:
-                    db.session.rollback()
-                    log_entry = Cin7ApiLog(
-                        id=uuid.uuid4(),
-                        client_id=credential_id_for_logging,
-                        user_id=None,
-                        upload_id=upload_id,
-                        endpoint=endpoint,
-                        method=method,
-                        request_url=request_url,
-                        request_headers=request_headers,
-                        request_body=request_body,
-                        response_status=response_status,
-                        response_body=parsed_response_body,
-                        raw_response_body_text=raw_response_text,
-                        error_message=error_message,
-                        duration_ms=duration_ms
-                    )
-                    db.session.add(log_entry)
-                    db.session.commit()
+                    try:
+                        log_entry = Cin7ApiLog(
+                            id=uuid.uuid4(),
+                            client_id=credential_id_for_logging,
+                            user_id=captured_user_id,  # Use captured user_id (None for webhooks, actual user_id for manual uploads)
+                            upload_id=upload_id,
+                            endpoint=endpoint,
+                            method=method,
+                            request_url=request_url,
+                            request_headers=request_headers,
+                            request_body=request_body,
+                            response_status=response_status,
+                            response_body=parsed_response_body,
+                            error_message=error_message,
+                            duration_ms=duration_ms
+                        )
+                        db.session.add(log_entry)
+                        db.session.commit()
+                        logger.info(f"✓ Logged API call (fallback): {method} {endpoint} - Status: {response_status}, trigger: {captured_trigger}, upload_id: {upload_id}")
+                    except Exception as fallback_error:
+                        logger.error(f"✗ Fallback logging also failed: {str(fallback_error)}", exc_info=True)
+                        db.session.rollback()
                 else:
-                    raise
+                    logger.error(f"✗ Non-trigger error in logger callback: {str(trigger_error)}", exc_info=True)
+                    # Don't raise - we don't want to break the main flow if logging fails
         except Exception as e:
-            logger.error(f"Error logging API call: {str(e)}")
-            db.session.rollback()
+            logger.error(f"✗ Error logging API call: {str(e)}", exc_info=True)
+            logger.error(f"  - Endpoint: {endpoint}, Method: {method}")
+            logger.error(f"  - Upload ID: {upload_id}, Trigger: {captured_trigger}, User ID: {captured_user_id}")
+            import traceback
+            logger.error(f"  - Traceback: {traceback.format_exc()}")
+            try:
+                db.session.rollback()
+            except:
+                pass
     
     # Initialize API client
+    logger.info(f"Initializing API client with logger_callback - trigger: {captured_trigger}, user_id: {captured_user_id}, upload_id: {upload_id}")
     api_client = Cin7SalesAPI(
         account_id=str(account_id),
         application_key=str(application_key),
         base_url='https://inventory.dearsystems.com/ExternalApi/v2/',
         logger_callback=log_api_call
     )
+    # Store reference to current_order_id list so process_single_order can update it
+    api_client._current_order_id_ref = current_order_id
+    logger.info(f"API client initialized - logger_callback set: {api_client.logger_callback is not None}")
     
     # Group rows into orders
     validator = SalesOrderValidator(api_client)
@@ -1133,6 +1382,10 @@ def process_webhook_csv(
         row_numbers = [r['row_number'] for r in group_rows]
         
         # Process order
+        # Reset order_id before processing each order (will be set in process_single_order)
+        if hasattr(api_client, '_current_order_id_ref'):
+            api_client._current_order_id_ref[0] = None
+        
         result = process_single_order(
             upload_id=upload_id,
             order_key=order_key,
@@ -1142,8 +1395,12 @@ def process_webhook_csv(
             settings=settings,
             api_client=api_client,
             builder=builder,
-            credential_id_for_logging=credential_id_for_logging
+            credential_id_for_logging=credential_id_for_logging,
         )
+        
+        # Clear order_id after processing
+        if hasattr(api_client, '_current_order_id_ref'):
+            api_client._current_order_id_ref[0] = None
         
         if result['status'] == 'success':
             successful_count += 1
@@ -1163,6 +1420,8 @@ def process_webhook_csv(
         upload.completed_at = datetime.utcnow()
         upload.total_rows = len(rows)
         db.session.commit()
+        # Emit event for real-time updates
+        emit_upload_event('upload_status_changed', str(upload_id), str(upload.client_id) if upload.client_id else None)
     
     return {
         'successful': successful_count,
@@ -1296,6 +1555,8 @@ def receive_email_webhook():
         db.session.add(upload)
         try:
             db.session.commit()
+            # Emit event when upload starts processing
+            emit_upload_event('upload_status_changed', str(upload_id), str(client_id_for_upload) if client_id_for_upload else None)
             logger.info(f"Upload record created successfully - upload_id: {upload_id}, is_duplicate: {is_duplicate}")
         except Exception as commit_error:
             logger.error(f"Failed to commit upload record - upload_id: {upload_id}, error: {str(commit_error)}", exc_info=True)
@@ -1345,6 +1606,8 @@ def receive_email_webhook():
                                 upload.status = 'completed' if failed_count == 0 else 'failed'
                                 upload.completed_at = datetime.utcnow()
                             db.session.commit()
+                            # Emit event for real-time updates
+                            emit_upload_event('upload_status_changed', str(upload_id), str(upload.client_id) if upload.client_id else None)
                             logger.info(f"Background processing completed - upload_id: {upload_id}, client: {client_name}, orders: {result.get('total_orders', 0)}, successful: {result.get('successful', 0)}, failed: {result.get('failed', 0)}")
                         else:
                             logger.error(f"Upload {upload_id} not found in database during background processing")
@@ -1409,6 +1672,264 @@ def receive_email_webhook():
     
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
+@webhooks_bp.route('/upload', methods=['POST'])
+@jwt_required()
+def manual_upload():
+    """
+    Manual file upload endpoint - processes CSV file directly (similar to webhook but without email parsing).
+    Follows the same workflow as webhook emails but skips preliminary steps since we're uploading directly.
+    """
+    try:
+        # Get user_id
+        user_id = get_jwt_identity()
+        try:
+            if isinstance(user_id, str):
+                user_id = uuid.UUID(user_id)
+        except (ValueError, AttributeError):
+            user_id = None
+        
+        # Get client_id from request
+        client_id = request.form.get('client_id')
+        if not client_id:
+            return jsonify({'error': 'client_id is required'}), 400
+        
+        try:
+            client_uuid = uuid.UUID(client_id)
+        except (ValueError, AttributeError):
+            return jsonify({'error': 'Invalid client_id format'}), 400
+        
+        # Get file
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Read file content
+        csv_content = file.read()
+        filename = file.filename
+        
+        # Get client_erp_credentials_id from client_id
+        # The client_id can be either a client_id or credential_id (for standalone connections)
+        query = text("""
+            SELECT 
+                cec.id as credential_id,
+                cec.client_id
+            FROM voyager.client_erp_credentials cec
+            WHERE cec.erp = 'cin7_core'
+            AND (cec.client_id = :client_id OR cec.id = :client_id)
+            LIMIT 1
+        """)
+        result = db.session.execute(query, {'client_id': client_uuid})
+        cred_row = result.fetchone()
+        
+        if not cred_row:
+            return jsonify({'error': 'Client not found or does not have Cin7 credentials configured'}), 404
+        
+        client_erp_credentials_id = cred_row.credential_id
+        client_id_for_upload = cred_row.client_id  # May be None for standalone connections
+        
+        # Check access: non-admins must have access via UserClient
+        # UserClient.client_id references voyager.client_erp_credentials.id (credential_id)
+        if user_id:
+            # Check if user is global admin
+            user = User.query.get(user_id)
+            is_admin = False
+            if user:
+                is_admin = (user.role == 'admin' or user.email == 'dan@paleblue.nyc')
+            
+            if not is_admin:
+                # Check if user has access to this credential
+                has_access = UserClient.query.filter_by(
+                    user_id=user_id, 
+                    client_id=client_erp_credentials_id
+                ).first() is not None
+                
+                if not has_access:
+                    return jsonify({'error': 'Access denied. You do not have access to this client.'}), 403
+        
+        logger.info(f"Manual upload - filename: {filename}, client_erp_credentials_id: {client_erp_credentials_id}, client_id: {client_id_for_upload}")
+        
+        # Check for duplicate upload (same filename + credentials within last hour) - idempotency
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        recent_duplicate = SalesOrderUpload.query.filter_by(
+            filename=filename,
+            client_erp_credentials_id=client_erp_credentials_id
+        ).filter(
+            SalesOrderUpload.created_at >= one_hour_ago
+        ).order_by(SalesOrderUpload.created_at.desc()).first()
+        
+        # Store CSV content as base64 for preview
+        import base64
+        csv_base64 = base64.b64encode(csv_content).decode('utf-8')
+        
+        # Create upload record immediately (even if duplicate, so it appears in UI)
+        upload_id = uuid.uuid4()
+        
+        # Check if this is a duplicate
+        is_duplicate = recent_duplicate is not None
+        if is_duplicate:
+            logger.info(f"Duplicate upload detected - filename: {filename}, existing upload_id: {recent_duplicate.id}")
+            upload = SalesOrderUpload(
+                id=upload_id,
+                user_id=user_id,  # Manual upload has user context
+                client_id=client_id_for_upload,  # May be None for standalone connections
+                client_erp_credentials_id=client_erp_credentials_id,
+                filename=filename,
+                total_rows=0,
+                successful_orders=0,
+                failed_orders=0,
+                status='duplicate',
+                error_log=[{
+                    'message': f'This file was already processed recently',
+                    'duplicate_of_upload_id': str(recent_duplicate.id),
+                    'duplicate_of_created_at': recent_duplicate.created_at.isoformat() if recent_duplicate.created_at else None,
+                    'duplicate_of_status': recent_duplicate.status
+                }],
+                csv_content=csv_base64
+            )
+        else:
+            logger.info(f"No duplicate found, proceeding with new upload creation")
+            upload = SalesOrderUpload(
+                id=upload_id,
+                user_id=user_id,  # Manual upload has user context
+                client_id=client_id_for_upload,  # May be None for standalone connections
+                client_erp_credentials_id=client_erp_credentials_id,
+                filename=filename,
+                total_rows=0,  # Will be updated after parsing
+                successful_orders=0,
+                failed_orders=0,
+                status='processing',
+                csv_content=csv_base64
+            )
+        
+        db.session.add(upload)
+        try:
+            db.session.commit()
+            # Emit event when upload starts processing
+            emit_upload_event('upload_status_changed', str(upload_id), str(client_id_for_upload) if client_id_for_upload else None)
+            logger.info(f"Upload record created successfully - upload_id: {upload_id}, is_duplicate: {is_duplicate}")
+        except Exception as commit_error:
+            logger.error(f"Failed to commit upload record - upload_id: {upload_id}, error: {str(commit_error)}", exc_info=True)
+            db.session.rollback()
+            raise
+        
+        # If duplicate, return early without processing
+        if is_duplicate:
+            return jsonify({
+                'message': 'This file was already processed recently',
+                'upload_id': str(upload_id),
+                'duplicate_of_upload_id': str(recent_duplicate.id),
+                'status': 'duplicate',
+                'created_at': upload.created_at.isoformat() if upload.created_at else None,
+                'duplicate': True
+            }), 200
+        
+        # Return 200 immediately to acknowledge upload receipt
+        # Process CSV in background thread (same as webhook)
+        # Capture user_id for use in background thread
+        captured_user_id = user_id
+        def process_in_background():
+            """Process CSV in background thread"""
+            app = None
+            try:
+                logger.info(f"Starting background processing for manual upload {upload_id}")
+                # Create new database session for background thread
+                from app import create_app
+                app = create_app('production' if os.environ.get('FLASK_ENV') == 'production' else 'development')
+                with app.app_context():
+                    try:
+                        result = process_webhook_csv(
+                            upload_id=upload_id,
+                            client_erp_credentials_id=client_erp_credentials_id,
+                            csv_content=csv_content,
+                            filename=filename,
+                            trigger='upload',  # Manual upload uses 'upload' trigger
+                            user_id=captured_user_id  # Pass the user_id for manual uploads
+                        )
+                        
+                        upload = SalesOrderUpload.query.get(upload_id)
+                        if upload:
+                            if 'error' in result:
+                                logger.error(f"Processing error for upload {upload_id}: {result.get('error')}")
+                                upload.status = 'failed'
+                                upload.error_log = [result.get('error')]
+                                upload.completed_at = datetime.utcnow()
+                            else:
+                                # Check if there are any failed orders
+                                failed_count = result.get('failed', 0)
+                                upload.status = 'completed' if failed_count == 0 else 'failed'
+                                upload.completed_at = datetime.utcnow()
+                            db.session.commit()
+                            # Emit event for real-time updates
+                            emit_upload_event('upload_status_changed', str(upload_id), str(upload.client_id) if upload.client_id else None)
+                            logger.info(f"Background processing completed - upload_id: {upload_id}, orders: {result.get('total_orders', 0)}, successful: {result.get('successful', 0)}, failed: {result.get('failed', 0)}")
+                        else:
+                            logger.error(f"Upload {upload_id} not found in database during background processing")
+                    except Exception as process_error:
+                        logger.error(f"Error in process_webhook_csv for upload {upload_id}: {str(process_error)}", exc_info=True)
+                        try:
+                            upload = SalesOrderUpload.query.get(upload_id)
+                            if upload:
+                                upload.status = 'failed'
+                                upload.error_log = [f'Processing error: {str(process_error)}']
+                                upload.completed_at = datetime.utcnow()
+                                db.session.commit()
+                        except Exception as db_error:
+                            logger.error(f"Error updating upload status after process error: {str(db_error)}", exc_info=True)
+                            raise
+                        raise
+                    finally:
+                        # Ensure session is closed and connections are returned to pool
+                        db.session.close()
+            except Exception as e:
+                logger.error(f"Error in background processing thread for upload {upload_id}: {str(e)}", exc_info=True)
+                # Try to update upload status, but don't create another app instance if we already have one
+                if app:
+                    try:
+                        with app.app_context():
+                            upload = SalesOrderUpload.query.get(upload_id)
+                            if upload:
+                                upload.status = 'failed'
+                                error_msg = str(e)[:500]  # Limit error message length
+                                upload.error_log = [f'Background processing thread error: {error_msg}']
+                                upload.completed_at = datetime.utcnow()
+                                db.session.commit()
+                                logger.info(f"Updated upload {upload_id} status to failed due to thread error")
+                            db.session.close()
+                    except Exception as db_error:
+                        logger.error(f"Error updating upload status: {str(db_error)}", exc_info=True)
+            finally:
+                # Dispose of the engine to close all connections from this app instance
+                if app and hasattr(app, 'extensions') and 'sqlalchemy' in app.extensions:
+                    try:
+                        db.engine.dispose()
+                        logger.debug(f"Disposed database engine for background thread {upload_id}")
+                    except Exception as dispose_error:
+                        logger.warning(f"Error disposing database engine: {str(dispose_error)}")
+        
+        # Start background processing
+        logger.info(f"Starting background thread for manual upload {upload_id}")
+        thread = threading.Thread(target=process_in_background, daemon=True)
+        thread.start()
+        logger.info(f"Background thread started for manual upload {upload_id}")
+        
+        logger.info(f"Manual upload received and queued for processing - upload_id: {upload_id}, filename: {filename}")
+        
+        # Return 200 immediately
+        return jsonify({
+            'message': 'File uploaded and processing started',
+            'upload_id': str(upload_id),
+            'status': 'processing',
+            'filename': filename
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error processing manual upload: {str(e)}", exc_info=True)
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
@@ -1667,10 +2188,17 @@ def get_order_api_logs(order_result_id):
         if not upload:
             return jsonify({'error': 'Upload not found'}), 404
         
-        # Get all API logs for this upload
-        # Get all logs for the upload - they're all related to processing orders from this upload
+        # Get API logs for this specific order (filter by order_id if available)
         logger.info(f"Fetching API logs for order {order_result_id}, upload_id: {order_result.upload_id}")
-        logs_query = Cin7ApiLog.query.filter_by(upload_id=order_result.upload_id)
+        
+        # First try to get logs filtered by order_id
+        logs_query = Cin7ApiLog.query.filter_by(order_id=order_result_uuid)
+        
+        # If no logs found with order_id, fall back to upload_id (for backward compatibility)
+        logs_count = logs_query.count()
+        if logs_count == 0:
+            logger.info(f"No logs found with order_id, falling back to upload_id filter")
+            logs_query = Cin7ApiLog.query.filter_by(upload_id=order_result.upload_id)
         
         # Order by creation time (oldest first to see the sequence)
         logs_query = logs_query.order_by(Cin7ApiLog.created_at.asc())
@@ -1681,9 +2209,8 @@ def get_order_api_logs(order_result_id):
         # Format response
         logs_data = []
         for log in logs:
-            # Use raw_response_body_text if available (preserves exact key order)
-            # Otherwise fall back to response_body (parsed, may have reordered keys)
-            response_body = log.raw_response_body_text if log.raw_response_body_text else log.response_body
+            # Use response_body (raw_response_body_text column doesn't exist in current schema)
+            response_body = log.response_body
             
             # Parse request_body if it's a string
             request_body = log.request_body
@@ -1762,8 +2289,14 @@ def get_failed_orders():
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         
-        # Build query
-        query = SalesOrderResult.query.filter_by(status='failed')
+        # Build query - include both failed orders and partial_success orders (orders with missing products)
+        from sqlalchemy import or_
+        query = SalesOrderResult.query.filter(
+            or_(
+                SalesOrderResult.status == 'failed',
+                SalesOrderResult.error_type == 'partial_success'
+            )
+        )
         
         # Filter by resolved status
         if not include_resolved:
@@ -1773,11 +2306,11 @@ def get_failed_orders():
         if error_type:
             query = query.filter_by(error_type=error_type)
         
-        # Filter by client_id if provided
+        # Filter by client_erp_credentials_id if provided
         if client_id:
             try:
                 client_uuid = uuid.UUID(client_id)
-                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_id == client_uuid)
+                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_erp_credentials_id == client_uuid)
             except ValueError:
                 return jsonify({'error': 'Invalid client_id format'}), 400
         
@@ -1821,6 +2354,7 @@ def get_failed_orders():
                 'last_retry_at': order_result.last_retry_at.isoformat() if order_result.last_retry_at else None,
                 'resolved_at': order_result.resolved_at.isoformat() if order_result.resolved_at else None,
                 'resolved_by': str(order_result.resolved_by) if order_result.resolved_by else None,
+                'review_notes': order_result.review_notes,
                 'upload': {
                     'id': str(upload.id) if upload else None,
                     'filename': upload.filename if upload else None,
@@ -1934,7 +2468,7 @@ def bulk_retry_orders():
 @jwt_required()
 def resolve_order(order_id):
     """
-    Manually mark a failed order as resolved.
+    Manually mark a failed order as resolved (reviewed) or unresolved (unreviewed).
     """
     try:
         order_result = SalesOrderResult.query.get(uuid.UUID(order_id))
@@ -1945,28 +2479,43 @@ def resolve_order(order_id):
             return jsonify({'error': 'Order already succeeded'}), 400
         
         data = request.get_json() or {}
-        reason = data.get('reason', '')
+        review_notes = data.get('review_notes', '').strip() if data.get('review_notes') else None
+        unresolve = data.get('unresolve', False)
+        
+        # Require review_notes when marking as resolved (reviewed)
+        if not unresolve and not review_notes:
+            return jsonify({'error': 'Review notes are required when marking an order as reviewed'}), 400
         
         # Get current user
         current_user_id = get_jwt_identity()
         user_id = uuid.UUID(current_user_id) if current_user_id else None
         
-        # Mark as resolved
-        order_result.resolved_at = datetime.utcnow()
-        order_result.resolved_by = user_id
-        
-        # Store resolution reason in order_data if provided
-        if reason:
-            if not order_result.order_data:
-                order_result.order_data = {}
-            order_result.order_data['resolution_reason'] = reason
+        if unresolve:
+            # Mark as unresolved (unreviewed)
+            order_result.resolved_at = None
+            order_result.resolved_by = None
+            order_result.review_notes = None  # Clear review notes
+            if order_result.order_data and 'resolution_reason' in order_result.order_data:
+                del order_result.order_data['resolution_reason']
+        else:
+            # Mark as resolved (reviewed)
+            order_result.resolved_at = datetime.utcnow()
+            order_result.resolved_by = user_id
+            order_result.review_notes = review_notes  # Store review notes
+            
+            # Also store in order_data for backward compatibility
+            if review_notes:
+                if not order_result.order_data:
+                    order_result.order_data = {}
+                order_result.order_data['resolution_reason'] = review_notes
         
         db.session.commit()
         
         return jsonify({
-            'status': 'resolved',
-            'resolved_at': order_result.resolved_at.isoformat(),
-            'resolved_by': str(order_result.resolved_by) if order_result.resolved_by else None
+            'status': 'unresolved' if unresolve else 'resolved',
+            'resolved_at': order_result.resolved_at.isoformat() if order_result.resolved_at else None,
+            'resolved_by': str(order_result.resolved_by) if order_result.resolved_by else None,
+            'review_notes': order_result.review_notes
         }), 200
     
     except ValueError:
@@ -1989,14 +2538,21 @@ def get_completed_orders():
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         
-        # Build query
-        query = SalesOrderResult.query.filter_by(status='success')
+        # Build query - exclude partial_success orders (they show up in failed orders)
+        from sqlalchemy import or_
+        query = SalesOrderResult.query.filter(
+            SalesOrderResult.status == 'success',
+            or_(
+                SalesOrderResult.error_type.is_(None),
+                SalesOrderResult.error_type != 'partial_success'
+            )
+        )
         
-        # Filter by client_id if provided
+        # Filter by client_erp_credentials_id if provided
         if client_id:
             try:
                 client_uuid = uuid.UUID(client_id)
-                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_id == client_uuid)
+                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_erp_credentials_id == client_uuid)
             except ValueError:
                 return jsonify({'error': 'Invalid client_id format'}), 400
         
@@ -2036,6 +2592,7 @@ def get_completed_orders():
                 'sale_order_id': str(order_result.sale_order_id) if order_result.sale_order_id else None,
                 'retry_count': order_result.retry_count or 0,
                 'reviewed': order_result.reviewed if order_result.reviewed is not None else False,
+                'review_notes': order_result.review_notes,
                 'upload': {
                     'id': str(upload.id) if upload else None,
                     'filename': upload.filename if upload else None,
@@ -2073,14 +2630,22 @@ def get_unreviewed_completed_orders_count():
         # Get query parameters
         client_id = request.args.get('client_id')
         
-        # Build query for unreviewed completed orders
-        query = SalesOrderResult.query.filter_by(status='success', reviewed=False)
+        # Build query for unreviewed completed orders - exclude partial_success (they show in failed orders)
+        from sqlalchemy import or_
+        query = SalesOrderResult.query.filter(
+            SalesOrderResult.status == 'success',
+            SalesOrderResult.reviewed == False,
+            or_(
+                SalesOrderResult.error_type.is_(None),
+                SalesOrderResult.error_type != 'partial_success'
+            )
+        )
         
-        # Filter by client_id if provided
+        # Filter by client_erp_credentials_id if provided
         if client_id:
             try:
                 client_uuid = uuid.UUID(client_id)
-                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_id == client_uuid)
+                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_erp_credentials_id == client_uuid)
             except ValueError:
                 return jsonify({'error': 'Invalid client_id format'}), 400
         
@@ -2096,12 +2661,55 @@ def get_unreviewed_completed_orders_count():
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
+@webhooks_bp.route('/orders/failed/unreviewed-count', methods=['GET'])
+@jwt_required()
+def get_unreviewed_failed_orders_count():
+    """
+    Get count of unreviewed failed orders (unresolved orders).
+    Used for the badge count in the UI.
+    """
+    try:
+        # Get query parameters
+        client_id = request.args.get('client_id')
+        
+        # Build query for unreviewed failed orders (orders that haven't been resolved/reviewed)
+        # Include both failed orders and partial_success orders (orders with missing products)
+        from sqlalchemy import or_
+        query = SalesOrderResult.query.filter(
+            or_(
+                SalesOrderResult.status == 'failed',
+                SalesOrderResult.error_type == 'partial_success'
+            )
+        )
+        query = query.filter(SalesOrderResult.resolved_at.is_(None))
+        
+        # Filter by client_erp_credentials_id if provided
+        if client_id:
+            try:
+                client_uuid = uuid.UUID(client_id)
+                query = query.join(SalesOrderUpload).filter(SalesOrderUpload.client_erp_credentials_id == client_uuid)
+            except ValueError:
+                return jsonify({'error': 'Invalid client_id format'}), 400
+        
+        # Get count
+        count = query.count()
+        
+        return jsonify({
+            'unreviewed_count': count
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Error getting unreviewed failed count: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
 @webhooks_bp.route('/orders/<order_id>/review', methods=['POST'])
 @jwt_required()
 def mark_order_as_reviewed(order_id):
     """
     Mark a completed order as reviewed or unreviewed.
     Accepts a 'reviewed' boolean in the request body.
+    Note: review_notes are only used for failed orders, not completed orders.
     """
     try:
         user_id = get_jwt_identity()
@@ -2121,8 +2729,10 @@ def mark_order_as_reviewed(order_id):
         if order_result.status != 'success':
             return jsonify({'error': 'Only completed orders can be marked as reviewed'}), 400
         
-        # Update reviewed status
+        # Update reviewed status (notes not used for completed orders)
         order_result.reviewed = reviewed
+        order_result.review_notes = None  # Completed orders don't have review notes
+        
         db.session.commit()
         
         return jsonify({
@@ -2170,6 +2780,63 @@ def get_upload_csv(upload_id):
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 
+@webhooks_bp.route('/events', methods=['GET'])
+def stream_events():
+    """
+    Server-Sent Events (SSE) endpoint for real-time upload status updates.
+    Clients connect to this endpoint and receive events when upload statuses change.
+    
+    Note: EventSource doesn't support custom headers, so we accept token as query param.
+    """
+    # Get token from query param (EventSource doesn't support custom headers)
+    token = request.args.get('token')
+    if not token:
+        return jsonify({'error': 'Token required'}), 401
+    
+    # Verify token manually
+    try:
+        from flask_jwt_extended import decode_token
+        from flask import current_app
+        # Decode token using the app's JWT secret
+        decoded_token = decode_token(token)
+        user_id = decoded_token.get('sub')
+        if not user_id:
+            return jsonify({'error': 'Invalid token'}), 401
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
+        return jsonify({'error': 'Invalid token'}), 401
+    def event_stream():
+        """Generator function that yields SSE events"""
+        try:
+            while True:
+                try:
+                    # Wait for event with timeout to allow periodic keepalive
+                    event_data = _event_queue.get(timeout=30)
+                    
+                    # Format as SSE event
+                    event_json = json.dumps(event_data)
+                    yield f"data: {event_json}\n\n"
+                except queue.Empty:
+                    # Send keepalive comment to keep connection alive
+                    yield ": keepalive\n\n"
+        except GeneratorExit:
+            # Client disconnected
+            logger.info("SSE client disconnected")
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}", exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+    
+    response = Response(
+        stream_with_context(event_stream()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',  # Disable buffering in nginx
+            'Connection': 'keep-alive'
+        }
+    )
+    return response
+
 @webhooks_bp.route('/queue', methods=['GET'])
 @jwt_required()
 def get_queue():
@@ -2190,7 +2857,7 @@ def get_queue():
         if client_id:
             try:
                 client_uuid = uuid.UUID(client_id)
-                query = query.filter_by(client_id=client_uuid)
+                query = query.filter_by(client_erp_credentials_id=client_uuid)
             except ValueError:
                 return jsonify({'error': 'Invalid client_id format'}), 400
         

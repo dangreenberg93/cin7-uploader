@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useClient } from '../contexts/ClientContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useActivityLog } from '../contexts/ActivityLogContext';
@@ -9,7 +9,9 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableFooter } from './ui/table';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
-import { Search, RefreshCw, Loader2 } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
+import { Checkbox } from './ui/checkbox';
+import { Search, RefreshCw, Loader2, Columns, Download } from 'lucide-react';
 
 const DataView = () => {
   const { selectedClientId } = useClient();
@@ -29,9 +31,16 @@ const DataView = () => {
   const [productsSearch, setProductsSearch] = useState('');
   const [productsLastUpdated, setProductsLastUpdated] = useState(null);
   
+  // Column visibility state
+  const [visibleCustomerColumns, setVisibleCustomerColumns] = useState(new Set());
+  const [visibleProductColumns, setVisibleProductColumns] = useState(new Set());
+  const [columnSearch, setColumnSearch] = useState('');
+  
   const prevClientIdRef = useRef(selectedClientId);
   const prevTabRef = useRef(activeTab);
   const [refreshingCache, setRefreshingCache] = useState(false);
+  const customersTabContentRef = useRef(null);
+  
 
   // Initialize connection status
   useEffect(() => {
@@ -108,7 +117,12 @@ const DataView = () => {
         params.search = searchQuery.trim();
       }
       const response = await axios.get('/sales/cached-customers', { params });
-      setCustomers(response.data.customers || []);
+      const customersData = response.data.customers || [];
+      // Debug: log first customer keys to see order
+      if (customersData.length > 0) {
+        console.log('First customer keys order:', Object.keys(customersData[0]));
+      }
+      setCustomers(customersData);
       setCustomersLastUpdated(response.data.last_updated || null);
     } catch (error) {
       console.error('Failed to load customers:', error);
@@ -134,8 +148,16 @@ const DataView = () => {
       if (searchQuery.trim()) {
         params.search = searchQuery.trim();
       }
+      // Add timestamp to prevent caching
+      params._t = Date.now();
       const response = await axios.get('/sales/cached-products', { params });
-      setProducts(response.data.products || []);
+      const productsData = response.data.products || [];
+      // Debug: log first product keys to see order
+      if (productsData.length > 0) {
+        console.log('First product keys order:', Object.keys(productsData[0]));
+      }
+      console.log('Products loaded:', productsData.length || 0, 'products');
+      setProducts(productsData);
       setProductsLastUpdated(response.data.last_updated || null);
     } catch (error) {
       console.error('Failed to load products:', error);
@@ -163,14 +185,30 @@ const DataView = () => {
         client_id: selectedClientId
       });
       
-      toast.success(`Cache refreshed: ${response.data.customer_count || 0} customers, ${response.data.product_count || 0} products`);
+      const customerCount = response.data.customer_count || 0;
+      const productCount = response.data.product_count || 0;
+      console.log('Cache refresh response:', { customerCount, productCount });
+      toast.success(`Cache refreshed: ${customerCount} customers, ${productCount} products`);
       
-      // Reload the current tab's data
-      if (activeTab === 'customers') {
-        await loadCustomers(customersSearch);
-      } else {
-        await loadProducts(productsSearch);
-      }
+      // Small delay to ensure database commit is complete and visible
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Reload both customers and products since both are refreshed
+      // Use allSettled so both loads happen even if one fails
+      console.log('Reloading customers and products after cache refresh...');
+      const results = await Promise.allSettled([
+        loadCustomers(customersSearch),
+        loadProducts(productsSearch)
+      ]);
+      
+      // Log any failures for debugging
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          console.error(`Failed to reload ${index === 0 ? 'customers' : 'products'}:`, result.reason);
+        } else {
+          console.log(`Successfully reloaded ${index === 0 ? 'customers' : 'products'}`);
+        }
+      });
     } catch (error) {
       console.error('Failed to refresh cache:', error);
       toast.error(`Failed to refresh cache: ${error.response?.data?.error || error.message}`);
@@ -178,6 +216,11 @@ const DataView = () => {
       setRefreshingCache(false);
     }
   }, [selectedClientId, activeTab, customersSearch, productsSearch, loadCustomers, loadProducts]);
+
+  // Reset column search when switching tabs
+  useEffect(() => {
+    setColumnSearch('');
+  }, [activeTab]);
 
   // Load data when client, tab, or search changes (with debounce for search only)
   useEffect(() => {
@@ -204,40 +247,343 @@ const DataView = () => {
     return () => clearTimeout(timeoutId);
   }, [selectedClientId, activeTab, customersSearch, productsSearch, loadCustomers, loadProducts]);
 
-  // Get customer table columns
+  // Hardcoded API response column order (from Cin7 API)
+  const API_CUSTOMER_COLUMN_ORDER = [
+    'Name', 'DisplayName', 'Currency', 'PaymentTerm', 'Discount', 'TaxRule', 'Carrier',
+    'SalesRepresentative', 'Location', 'Comments', 'AccountReceivable', 'RevenueAccount', 'PriceTier',
+    'TaxNumber', 'AdditionalAttribute1', 'AdditionalAttribute2', 'AdditionalAttribute3', 'AdditionalAttribute4',
+    'AdditionalAttribute5', 'AdditionalAttribute6', 'AdditionalAttribute7', 'AdditionalAttribute8',
+    'AdditionalAttribute9', 'AdditionalAttribute10', 'AttributeSet', 'Tags', 'Status', 'CreditLimit',
+    'IsOnCreditHold', 'LastModifiedOn', 'Addresses', 'Contacts', 'ProductPrices'
+  ];
+
+  const API_PRODUCT_COLUMN_ORDER = [
+    'Name', 'SKU', 'Category', 'Brand', 'Type', 'CostingMethod', 'DropShipMode', 'DefaultLocation',
+    'Length', 'Width', 'Height', 'Weight', 'UOM', 'WeightUnits', 'DimensionsUnits', 'Barcode',
+    'MinimumBeforeReorder', 'ReorderQuantity', 'PriceTier1', 'PriceTier2', 'PriceTier3', 'PriceTier4',
+    'PriceTier5', 'PriceTier6', 'PriceTier7', 'PriceTier8', 'PriceTier9', 'PriceTier10', 'PriceTiers',
+    'AverageCost', 'ShortDescription', 'InternalNote', 'Description', 'AdditionalAttribute1',
+    'AdditionalAttribute2', 'AdditionalAttribute3', 'AdditionalAttribute4', 'AdditionalAttribute5',
+    'AdditionalAttribute6', 'AdditionalAttribute7', 'AdditionalAttribute8', 'AdditionalAttribute9',
+    'AdditionalAttribute10', 'AttributeSet', 'DiscountRule', 'Tags', 'Status', 'StockLocator',
+    'COGSAccount', 'RevenueAccount', 'ExpenseAccount', 'InventoryAccount', 'PurchaseTaxRule',
+    'SaleTaxRule', 'LastModifiedOn', 'Sellable', 'PickZones', 'BillOfMaterial', 'AutoAssembly',
+    'AutoDisassembly', 'QuantityToProduce', 'AlwaysShowQuantity', 'AssemblyInstructionURL',
+    'AssemblyCostEstimationMethod', 'Suppliers', 'ReorderLevels', 'BillOfMaterialsProducts',
+    'BillOfMaterialsServices', 'Movements', 'Attachments', 'BOMType', 'WarrantyName', 'CustomPrices',
+    'CartonHeight', 'CartonWidth', 'CartonLength', 'CartonQuantity', 'CartonInnerQuantity', 'HSCode',
+    'CountryOfOrigin', 'CountryOfOriginCode', 'CreatedDate'
+  ];
+
+  // Get customer table columns - use hardcoded API order
   const getCustomerColumns = () => {
     if (customers.length === 0) return [];
     
-    const allKeys = new Set();
+    // Get all unique keys from all customers
+    const allKeysSet = new Set();
     customers.forEach(customer => {
-      Object.keys(customer).forEach(key => allKeys.add(key));
+      Object.keys(customer).forEach(key => allKeysSet.add(key));
     });
     
-    // Prioritize common fields
-    const priorityKeys = ['Name', 'Email', 'Phone', 'ID', 'CompanyName', 'CustomerID'];
-    const otherKeys = Array.from(allKeys).filter(key => !priorityKeys.includes(key));
+    // Start with Name first (for sticky column)
+    const orderedColumns = ['Name'];
     
-    return [...priorityKeys.filter(key => allKeys.has(key)), ...otherKeys.sort()];
+    // Add columns in API order that exist in the data
+    for (const key of API_CUSTOMER_COLUMN_ORDER) {
+      if (key !== 'Name' && allKeysSet.has(key)) {
+        orderedColumns.push(key);
+      }
+    }
+    
+    // Add any additional keys that aren't in the standard order
+    for (const key of Array.from(allKeysSet).sort()) {
+      if (key !== 'ID' && key !== 'Name' && !API_CUSTOMER_COLUMN_ORDER.includes(key)) {
+        orderedColumns.push(key);
+      }
+    }
+    
+    return orderedColumns;
   };
 
-  // Get product table columns
+  // Get product table columns - use hardcoded API order
   const getProductColumns = () => {
     if (products.length === 0) return [];
     
-    const allKeys = new Set();
+    // Get all unique keys from all products
+    const allKeysSet = new Set();
     products.forEach(product => {
-      Object.keys(product).forEach(key => allKeys.add(key));
+      Object.keys(product).forEach(key => allKeysSet.add(key));
     });
     
-    // Prioritize common fields
-    const priorityKeys = ['Name', 'SKU', 'Barcode', 'ID', 'ProductID'];
-    const otherKeys = Array.from(allKeys).filter(key => !priorityKeys.includes(key));
+    // Start with Name first (for sticky column)
+    const orderedColumns = ['Name'];
     
-    return [...priorityKeys.filter(key => allKeys.has(key)), ...otherKeys.sort()];
+    // Add columns in API order that exist in the data
+    for (const key of API_PRODUCT_COLUMN_ORDER) {
+      if (key !== 'Name' && allKeysSet.has(key)) {
+        orderedColumns.push(key);
+      }
+    }
+    
+    // Add any additional keys that aren't in the standard order
+    for (const key of Array.from(allKeysSet).sort()) {
+      if (key !== 'ID' && key !== 'Name' && !API_PRODUCT_COLUMN_ORDER.includes(key)) {
+        orderedColumns.push(key);
+      }
+    }
+    
+    return orderedColumns;
   };
 
-  const customerColumns = getCustomerColumns();
-  const productColumns = getProductColumns();
+  const allCustomerColumns = useMemo(() => getCustomerColumns(), [customers]);
+  const allProductColumns = useMemo(() => getProductColumns(), [products]);
+
+  // Track the last column set we initialized with (to detect when columns actually change)
+  const lastCustomerColumnsRef = useRef('');
+  const lastProductColumnsRef = useRef('');
+
+  // Reset initialization refs when client changes
+  useEffect(() => {
+    lastCustomerColumnsRef.current = '';
+    lastProductColumnsRef.current = '';
+    setVisibleCustomerColumns(new Set());
+    setVisibleProductColumns(new Set());
+  }, [selectedClientId]);
+
+  // Initialize visible columns when columns first become available or when they change
+  useEffect(() => {
+    const currentColumnsString = allCustomerColumns.join(',');
+    if (allCustomerColumns.length > 0 && currentColumnsString !== lastCustomerColumnsRef.current) {
+      // Only initialize if we haven't initialized yet (empty string means first time)
+      if (lastCustomerColumnsRef.current === '') {
+        setVisibleCustomerColumns(new Set(allCustomerColumns));
+      }
+      lastCustomerColumnsRef.current = currentColumnsString;
+    }
+  }, [allCustomerColumns]);
+
+  useEffect(() => {
+    const currentColumnsString = allProductColumns.join(',');
+    if (allProductColumns.length > 0 && currentColumnsString !== lastProductColumnsRef.current) {
+      // Only initialize if we haven't initialized yet (empty string means first time)
+      if (lastProductColumnsRef.current === '') {
+        setVisibleProductColumns(new Set(allProductColumns));
+      }
+      lastProductColumnsRef.current = currentColumnsString;
+    }
+  }, [allProductColumns]);
+
+  // Ensure Name is always in the visible set (only check when columns change, not on every toggle)
+  const customerColumnsString = useMemo(() => allCustomerColumns.join(','), [allCustomerColumns]);
+  const productColumnsString = useMemo(() => allProductColumns.join(','), [allProductColumns]);
+
+  useEffect(() => {
+    if (allCustomerColumns.includes('Name') && !visibleCustomerColumns.has('Name')) {
+      setVisibleCustomerColumns(prev => {
+        const newSet = new Set(prev);
+        newSet.add('Name');
+        return newSet;
+      });
+    }
+  }, [customerColumnsString]); // Only when columns actually change
+
+  useEffect(() => {
+    if (allProductColumns.includes('Name') && !visibleProductColumns.has('Name')) {
+      setVisibleProductColumns(prev => {
+        const newSet = new Set(prev);
+        newSet.add('Name');
+        return newSet;
+      });
+    }
+  }, [productColumnsString]); // Only when columns actually change
+
+  // Get filtered visible columns (always include Name, preserve API order)
+  const getVisibleCustomerColumns = () => {
+    // Filter allCustomerColumns (which preserves API order) to only include visible ones
+    const visible = allCustomerColumns.filter(col => 
+      visibleCustomerColumns.has(col) || col === 'Name'
+    );
+    return visible.length > 0 ? visible : allCustomerColumns;
+  };
+
+  const getVisibleProductColumns = () => {
+    // Filter allProductColumns (which preserves API order) to only include visible ones
+    const visible = allProductColumns.filter(col => 
+      visibleProductColumns.has(col) || col === 'Name'
+    );
+    return visible.length > 0 ? visible : allProductColumns;
+  };
+
+  // Ensure Name is always first for sticky column, preserve API order for rest
+  const customerColumns = useMemo(() => {
+    const cols = getVisibleCustomerColumns();
+    // Preserve order: Name first, then rest in original API order
+    if (cols.includes('Name')) {
+      const nameIndex = cols.indexOf('Name');
+      return ['Name', ...cols.slice(0, nameIndex), ...cols.slice(nameIndex + 1)];
+    }
+    return cols;
+  }, [visibleCustomerColumns, allCustomerColumns]);
+  
+  const productColumns = useMemo(() => {
+    const cols = getVisibleProductColumns();
+    // Preserve order: Name first, then rest in original API order
+    if (cols.includes('Name')) {
+      const nameIndex = cols.indexOf('Name');
+      return ['Name', ...cols.slice(0, nameIndex), ...cols.slice(nameIndex + 1)];
+    }
+    return cols;
+  }, [visibleProductColumns, allProductColumns]);
+
+  // Toggle column visibility
+  const toggleCustomerColumn = useCallback((column) => {
+    if (column === 'Name') return; // Name cannot be toggled off
+    setVisibleCustomerColumns(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(column)) {
+        newSet.delete(column);
+      } else {
+        newSet.add(column);
+      }
+      return newSet;
+    });
+  }, []);
+
+  const toggleProductColumn = useCallback((column) => {
+    if (column === 'Name') return; // Name cannot be toggled off
+    setVisibleProductColumns(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(column)) {
+        newSet.delete(column);
+      } else {
+        newSet.add(column);
+      }
+      return newSet;
+    });
+  }, []);
+
+  // Select all columns
+  const selectAllCustomerColumns = () => {
+    setVisibleCustomerColumns(new Set(allCustomerColumns));
+  };
+
+  const selectAllProductColumns = () => {
+    setVisibleProductColumns(new Set(allProductColumns));
+  };
+
+  // Deselect all columns (but keep Name)
+  const deselectAllCustomerColumns = () => {
+    if (allCustomerColumns.includes('Name')) {
+      setVisibleCustomerColumns(new Set(['Name']));
+    } else {
+      setVisibleCustomerColumns(new Set());
+    }
+  };
+
+  const deselectAllProductColumns = () => {
+    if (allProductColumns.includes('Name')) {
+      setVisibleProductColumns(new Set(['Name']));
+    } else {
+      setVisibleProductColumns(new Set());
+    }
+  };
+
+  // Check if all columns are selected
+  const areAllCustomerColumnsSelected = () => {
+    if (allCustomerColumns.length === 0) return false;
+    return allCustomerColumns.every(col => visibleCustomerColumns.has(col));
+  };
+
+  const areAllProductColumnsSelected = () => {
+    if (allProductColumns.length === 0) return false;
+    return allProductColumns.every(col => visibleProductColumns.has(col));
+  };
+
+  // Check if only Name is visible (or nothing)
+  const isOnlyNameVisibleForCustomers = () => {
+    const visible = Array.from(visibleCustomerColumns);
+    return visible.length === 0 || (visible.length === 1 && visible[0] === 'Name');
+  };
+
+  const isOnlyNameVisibleForProducts = () => {
+    const visible = Array.from(visibleProductColumns);
+    return visible.length === 0 || (visible.length === 1 && visible[0] === 'Name');
+  };
+
+  // Get filtered columns for popover (based on search)
+  const getFilteredCustomerColumns = () => {
+    if (!columnSearch.trim()) return allCustomerColumns;
+    const searchLower = columnSearch.toLowerCase();
+    return allCustomerColumns.filter(col => 
+      col.toLowerCase().includes(searchLower)
+    );
+  };
+
+  const getFilteredProductColumns = () => {
+    if (!columnSearch.trim()) return allProductColumns;
+    const searchLower = columnSearch.toLowerCase();
+    return allProductColumns.filter(col => 
+      col.toLowerCase().includes(searchLower)
+    );
+  };
+
+  // Download CSV function
+  const downloadCSV = useCallback(() => {
+    const isCustomers = activeTab === 'customers';
+    const data = isCustomers ? customers : products;
+    const visibleCols = isCustomers ? customerColumns : productColumns;
+    
+    if (data.length === 0) {
+      toast.error('No data to download');
+      return;
+    }
+
+    // Check if ID exists in the data
+    const hasID = data.length > 0 && 'ID' in data[0];
+    
+    // Ensure ID is first, then other visible columns (excluding ID if it's already in visibleCols)
+    const columnsToExport = hasID 
+      ? ['ID', ...visibleCols.filter(col => col !== 'ID')]
+      : visibleCols;
+    
+    // Create CSV header
+    const headers = columnsToExport.map(col => `"${col}"`).join(',');
+    
+    // Create CSV rows
+    const rows = data.map(item => {
+      return columnsToExport.map(col => {
+        let value = item[col];
+        if (value === null || value === undefined) {
+          value = '';
+        } else if (typeof value === 'object') {
+          value = JSON.stringify(value);
+        } else {
+          value = String(value);
+        }
+        // Escape quotes and wrap in quotes
+        value = value.replace(/"/g, '""');
+        return `"${value}"`;
+      }).join(',');
+    });
+    
+    // Combine header and rows
+    const csvContent = [headers, ...rows].join('\n');
+    
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    const dateStr = new Date().toISOString().split('T')[0];
+    link.setAttribute('download', `${isCustomers ? 'customers' : 'products'}_${dateStr}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    toast.success(`Downloaded ${isCustomers ? 'customers' : 'products'} CSV`);
+  }, [activeTab, customers, products, customerColumns, productColumns]);
 
   const formatValue = (value) => {
     if (value === null || value === undefined) return '-';
@@ -278,23 +624,23 @@ const DataView = () => {
               </TabsList>
               {activeTab === 'customers' && (
                 <div className="relative max-w-sm">
-                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                   <Input
                     placeholder="Search customers..."
                     value={customersSearch}
                     onChange={(e) => setCustomersSearch(e.target.value)}
-                    className="pl-8"
+                    className="pl-7 h-9 text-xs"
                   />
                 </div>
               )}
               {activeTab === 'products' && (
                 <div className="relative max-w-sm">
-                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                   <Input
                     placeholder="Search products..."
                     value={productsSearch}
                     onChange={(e) => setProductsSearch(e.target.value)}
-                    className="pl-8"
+                    className="pl-7 h-9 text-xs"
                   />
                 </div>
               )}
@@ -302,20 +648,168 @@ const DataView = () => {
                 <Button
                   variant="outline"
                   size="sm"
+                  className="h-9 px-3"
+                  onClick={downloadCSV}
+                  disabled={customersLoading || productsLoading || (activeTab === 'customers' ? customers.length === 0 : products.length === 0)}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                </Button>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-9 px-3"
+                    >
+                      <Columns className="h-3.5 w-3.5" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-64 p-0" align="end">
+                    <div className="p-3 space-y-3">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-sm font-semibold">Columns</h4>
+                          <div className="flex items-center gap-1">
+                            {activeTab === 'customers' ? (
+                              !areAllCustomerColumnsSelected() && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={selectAllCustomerColumns}
+                                >
+                                  Select All
+                                </Button>
+                              )
+                            ) : (
+                              !areAllProductColumnsSelected() && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={selectAllProductColumns}
+                                >
+                                  Select All
+                                </Button>
+                              )
+                            )}
+                            {activeTab === 'customers' ? (
+                              !isOnlyNameVisibleForCustomers() && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={deselectAllCustomerColumns}
+                                >
+                                  Deselect All
+                                </Button>
+                              )
+                            ) : (
+                              !isOnlyNameVisibleForProducts() && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={deselectAllProductColumns}
+                                >
+                                  Deselect All
+                                </Button>
+                              )
+                            )}
+                          </div>
+                        </div>
+                        <div className="relative">
+                          <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3 w-3 text-muted-foreground" />
+                          <Input
+                            placeholder="Search columns..."
+                            value={columnSearch}
+                            onChange={(e) => setColumnSearch(e.target.value)}
+                            className="pl-7 h-8 text-xs"
+                          />
+                        </div>
+                      </div>
+                      <div className="max-h-64 overflow-y-auto space-y-2">
+                        {activeTab === 'customers' ? (
+                          getFilteredCustomerColumns().length > 0 ? (
+                            getFilteredCustomerColumns().map((column) => {
+                              const isVisible = visibleCustomerColumns.has(column) || column === 'Name';
+                              const isName = column === 'Name';
+                              return (
+                                <div key={column} className="flex items-center space-x-2">
+                                  <Checkbox
+                                    id={`customer-col-${column}`}
+                                    checked={isVisible}
+                                    onCheckedChange={() => toggleCustomerColumn(column)}
+                                    disabled={isName}
+                                  />
+                                  <label
+                                    htmlFor={`customer-col-${column}`}
+                                    className={`text-xs cursor-pointer flex-1 ${
+                                      isName ? 'text-muted-foreground' : ''
+                                    }`}
+                                  >
+                                    {column}
+                                  </label>
+                                </div>
+                              );
+                            })
+                          ) : (
+                            <div className="text-xs text-muted-foreground text-center py-2">
+                              No columns found
+                            </div>
+                          )
+                        ) : (
+                          getFilteredProductColumns().length > 0 ? (
+                            getFilteredProductColumns().map((column) => {
+                              const isVisible = visibleProductColumns.has(column) || column === 'Name';
+                              const isName = column === 'Name';
+                              return (
+                                <div key={column} className="flex items-center space-x-2">
+                                  <Checkbox
+                                    id={`product-col-${column}`}
+                                    checked={isVisible}
+                                    onCheckedChange={() => toggleProductColumn(column)}
+                                    disabled={isName}
+                                  />
+                                  <label
+                                    htmlFor={`product-col-${column}`}
+                                    className={`text-xs cursor-pointer flex-1 ${
+                                      isName ? 'text-muted-foreground' : ''
+                                    }`}
+                                  >
+                                    {column}
+                                  </label>
+                                </div>
+                              );
+                            })
+                          ) : (
+                            <div className="text-xs text-muted-foreground text-center py-2">
+                              No columns found
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-9 px-3"
                   onClick={refreshCache}
                   disabled={refreshingCache || customersLoading || productsLoading}
                 >
                   {refreshingCache ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <RefreshCw className="h-4 w-4" />
+                    <RefreshCw className="h-3.5 w-3.5" />
                   )}
                 </Button>
               </div>
             </div>
           </div>
         </div>
-        <TabsContent value="customers" className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
+        <TabsContent value="customers" ref={customersTabContentRef} className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
           <div className="flex-1 flex flex-col min-h-0">
             {customersLoading && customers.length === 0 ? (
               <div className="flex items-center justify-center py-8">
@@ -327,28 +821,66 @@ const DataView = () => {
                 No customers found. {customersSearch && 'Try adjusting your search.'}
               </div>
             ) : (
-              <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0">
-                <div className="flex-1 overflow-auto">
-                  <Table className="border-0">
-                      <TableHeader className="sticky top-0 bg-white z-10">
-                        <TableRow>
-                          {customerColumns.map((column) => (
-                            <TableHead key={column} className="text-xs font-semibold whitespace-nowrap">
-                              {column}
-                            </TableHead>
-                          ))}
+              <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0 relative" id="customers-table-wrapper" style={{ width: '100%', maxWidth: '100%' }}>
+                <div className="flex-1 overflow-auto" id="customers-scroll-container" style={{ width: '100%', maxWidth: '100%' }}>
+                  <Table className="border-0 border-separate border-spacing-0">
+                      <TableHeader className="bg-white">
+                        <TableRow className="bg-white">
+                          {customerColumns.map((column, colIdx) => {
+                            const isNameColumn = column === 'Name';
+                            return (
+                              <TableHead 
+                                key={column} 
+                                className={`text-xs font-semibold whitespace-nowrap ${
+                                  isNameColumn 
+                                    ? 'border-r-2 border-gray-200' 
+                                    : ''
+                                }`}
+                                style={isNameColumn ? { 
+                                  position: 'sticky',
+                                  left: 0,
+                                  top: 0,
+                                  zIndex: 30,
+                                  backgroundColor: '#ffffff',
+                                  borderRightColor: '#e5e7eb'
+                                } : { 
+                                  position: 'sticky',
+                                  top: 0,
+                                  zIndex: 2,
+                                  backgroundColor: '#ffffff'
+                                }}
+                              >
+                                {column}
+                              </TableHead>
+                            );
+                          })}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {customers.map((customer, idx) => (
-                          <TableRow key={idx}>
-                            {customerColumns.map((column) => (
-                              <TableCell key={column} className="text-xs whitespace-nowrap">
-                                {formatValue(customer[column])}
-                              </TableCell>
-                            ))}
-                          </TableRow>
-                        ))}
+                        {customers.map((customer, idx) => {
+                          return (
+                            <TableRow key={idx}>
+                              {customerColumns.map((column, colIdx) => {
+                                const isNameColumn = column === 'Name';
+                                return (
+                                  <TableCell 
+                                    key={column} 
+                                    className={`text-xs whitespace-nowrap ${
+                                      isNameColumn 
+                                        ? 'sticky left-0 bg-white z-10 border-r-2 border-gray-200' 
+                                        : ''
+                                    }`}
+                                    style={isNameColumn ? { 
+                                      borderRightColor: '#e5e7eb'
+                                    } : {}}
+                                  >
+                                    {formatValue(customer[column])}
+                                  </TableCell>
+                                );
+                              })}
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   </div>
@@ -383,24 +915,60 @@ const DataView = () => {
             ) : (
               <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0">
                 <div className="flex-1 overflow-auto">
-                  <Table className="border-0">
-                      <TableHeader className="sticky top-0 bg-white z-10">
-                        <TableRow>
-                          {productColumns.map((column) => (
-                            <TableHead key={column} className="text-xs font-semibold whitespace-nowrap">
-                              {column}
-                            </TableHead>
-                          ))}
+                  <Table className="border-0 border-separate border-spacing-0">
+                      <TableHeader className="bg-white">
+                        <TableRow className="bg-white">
+                          {productColumns.map((column, colIdx) => {
+                            const isNameColumn = column === 'Name';
+                            return (
+                              <TableHead 
+                                key={column} 
+                                className={`text-xs font-semibold whitespace-nowrap ${
+                                  isNameColumn 
+                                    ? 'border-r-2 border-gray-200' 
+                                    : ''
+                                }`}
+                                style={isNameColumn ? { 
+                                  position: 'sticky',
+                                  left: 0,
+                                  top: 0,
+                                  zIndex: 30,
+                                  backgroundColor: '#ffffff',
+                                  borderRightColor: '#e5e7eb'
+                                } : { 
+                                  position: 'sticky',
+                                  top: 0,
+                                  zIndex: 2,
+                                  backgroundColor: '#ffffff'
+                                }}
+                              >
+                                {column}
+                              </TableHead>
+                            );
+                          })}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {products.map((product, idx) => (
                           <TableRow key={idx}>
-                            {productColumns.map((column) => (
-                              <TableCell key={column} className="text-xs whitespace-nowrap">
-                                {formatValue(product[column])}
-                              </TableCell>
-                            ))}
+                            {productColumns.map((column, colIdx) => {
+                              const isNameColumn = column === 'Name';
+                              return (
+                                <TableCell 
+                                  key={column} 
+                                  className={`text-xs whitespace-nowrap ${
+                                    isNameColumn 
+                                      ? 'sticky left-0 bg-white z-10 border-r-2 border-gray-200' 
+                                      : ''
+                                  }`}
+                                  style={isNameColumn ? { 
+                                    borderRightColor: '#e5e7eb'
+                                  } : {}}
+                                >
+                                  {formatValue(product[column])}
+                                </TableCell>
+                              );
+                            })}
                           </TableRow>
                         ))}
                       </TableBody>

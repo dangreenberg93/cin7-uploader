@@ -25,3 +25,4 @@ def downgrade():
     # Remove raw_response_body_text column
     op.drop_column('cin7_api_log', 'raw_response_body_text', schema='cin7_uploader')
 
+

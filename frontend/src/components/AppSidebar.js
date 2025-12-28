@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { LogOut, ChevronsUpDown, Shield, FileText, Cog, Upload, List, Database, AlertCircle } from 'lucide-react';
+import { LogOut, ChevronsUpDown, Shield, FileText, Cog, List, Database } from 'lucide-react';
 import { useClient } from '../contexts/ClientContext';
 import axios from 'axios';
 import { Badge } from './ui/badge';
@@ -60,12 +60,12 @@ export function AppSidebar({ user, onLogout }) {
 
     const loadCounts = async () => {
       try {
-        // Load failed orders count
-        const failedResponse = await axios.get('/webhooks/orders/failed');
-        setFailedOrdersCount(failedResponse.data.failed_orders?.length || 0);
+        // Load failed orders count (unresolved orders) - queries table directly
+        const failedResponse = await axios.get(`/webhooks/orders/failed/unreviewed-count?client_id=${selectedClientId}`);
+        setFailedOrdersCount(failedResponse.data.unreviewed_count || 0);
 
-        // Load unreviewed count
-        const unreviewedResponse = await axios.get('/webhooks/orders/completed/unreviewed-count');
+        // Load unreviewed completed orders count - queries table directly
+        const unreviewedResponse = await axios.get(`/webhooks/orders/completed/unreviewed-count?client_id=${selectedClientId}`);
         setUnreviewedCount(unreviewedResponse.data.unreviewed_count || 0);
       } catch (error) {
         console.error('Failed to load queue counts:', error);
@@ -73,9 +73,21 @@ export function AppSidebar({ user, onLogout }) {
     };
 
     loadCounts();
-    // Refresh every 30 seconds
-    const interval = setInterval(loadCounts, 30000);
-    return () => clearInterval(interval);
+    
+    // Listen for custom events to refresh counts immediately (triggered by SSE events)
+    const handleRefreshCounts = () => {
+      loadCounts();
+    };
+    
+    window.addEventListener('refreshSidebarCounts', handleRefreshCounts);
+    
+    // Light fallback polling every 60 seconds (in case events are missed)
+    const fallbackInterval = setInterval(loadCounts, 60000);
+    
+    return () => {
+      clearInterval(fallbackInterval);
+      window.removeEventListener('refreshSidebarCounts', handleRefreshCounts);
+    };
   }, [selectedClientId]);
 
   return (
@@ -167,10 +179,11 @@ export function AppSidebar({ user, onLogout }) {
                     !location.search.includes('tab=failed') && 
                     !location.search.includes('review=needs-review')
                   }
+                  className="data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
                 >
                   <a href="#" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
                     <List />
-                    <span>Queue</span>
+                    <span>Sales Orders</span>
                   </a>
                 </SidebarMenuButton>
                 {(failedOrdersCount > 0 || unreviewedCount > 0) && (
@@ -179,7 +192,7 @@ export function AppSidebar({ user, onLogout }) {
                       <SidebarMenuButton 
                         asChild 
                         size="sm"
-                        className="h-7 text-xs pl-2"
+                        className="h-7 text-xs pl-2 data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
                         isActive={location.pathname === '/' && location.search.includes('review=needs-review')}
                       >
                         <a href="#" onClick={(e) => { 
@@ -187,7 +200,7 @@ export function AppSidebar({ user, onLogout }) {
                           navigate('/?tab=completed&review=needs-review'); 
                         }}>
                           <span>To Review</span>
-                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
+                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
                         </a>
                       </SidebarMenuButton>
                     )}
@@ -195,16 +208,15 @@ export function AppSidebar({ user, onLogout }) {
                       <SidebarMenuButton 
                         asChild 
                         size="sm"
-                        className="h-7 text-xs pl-2"
+                        className="h-7 text-xs pl-2 data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
                         isActive={location.pathname === '/' && location.search.includes('tab=failed')}
                       >
                         <a href="#" onClick={(e) => { 
                           e.preventDefault(); 
                           navigate('/?tab=failed'); 
                         }}>
-                          <AlertCircle className="h-3 w-3" />
                           <span>Failed Orders</span>
-                          <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0 h-4 shadow-none hover:bg-destructive">{failedOrdersCount}</Badge>
+                          <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center shadow-none hover:bg-destructive">{failedOrdersCount}</Badge>
                         </a>
                       </SidebarMenuButton>
                     )}
@@ -212,15 +224,11 @@ export function AppSidebar({ user, onLogout }) {
                 )}
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/upload'}>
-                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/upload'); }}>
-                    <Upload />
-                    <span>Manual Upload</span>
-                  </a>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/data'}>
+                <SidebarMenuButton 
+                  asChild 
+                  isActive={location.pathname === '/data'}
+                  className="data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
+                >
                   <a href="#" onClick={(e) => { e.preventDefault(); navigate('/data'); }}>
                     <Database />
                     <span>Data</span>
@@ -235,7 +243,11 @@ export function AppSidebar({ user, onLogout }) {
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/mappings'}>
+                <SidebarMenuButton 
+                  asChild 
+                  isActive={location.pathname === '/mappings'}
+                  className="data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
+                >
                   <a href="#" onClick={(e) => { e.preventDefault(); navigate('/mappings'); }}>
                     <FileText />
                     <span>CSV Mappings</span>
@@ -243,7 +255,11 @@ export function AppSidebar({ user, onLogout }) {
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={location.pathname === '/settings/cin7'}>
+                <SidebarMenuButton 
+                  asChild 
+                  isActive={location.pathname === '/settings/cin7'}
+                  className="data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
+                >
                   <a href="#" onClick={(e) => { e.preventDefault(); navigate('/settings/cin7'); }}>
                     <Cog />
                     <span>Cin7 Config</span>
@@ -259,7 +275,11 @@ export function AppSidebar({ user, onLogout }) {
             <SidebarGroupContent>
               <SidebarMenu>
                 <SidebarMenuItem>
-                  <SidebarMenuButton asChild isActive={location.pathname === '/admin'}>
+                  <SidebarMenuButton 
+                    asChild 
+                    isActive={location.pathname === '/admin'}
+                    className="data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
+                  >
                     <a href="#" onClick={(e) => { e.preventDefault(); navigate('/admin'); }}>
                       <Shield />
                       <span>Admin</span>

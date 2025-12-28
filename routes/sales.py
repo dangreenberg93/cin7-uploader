@@ -13,6 +13,7 @@ import uuid
 import os
 from datetime import datetime
 import json
+from collections import OrderedDict
 
 sales_bp = Blueprint('sales', __name__)
 
@@ -140,12 +141,40 @@ def upload_csv():
         if csv_column:
             initial_mapping[cin7_field] = csv_column
     
+    # Get client_id for upload record (may be None for standalone connections)
+    # The client_uuid here is actually client_erp_credentials_id, so we need to look up the actual client_id
+    client_id_for_upload = None
+    client_query = text("""
+        SELECT client_id FROM voyager.client_erp_credentials
+        WHERE id = :cred_id
+    """)
+    client_result = db.session.execute(client_query, {'cred_id': client_uuid})
+    client_row = client_result.fetchone()
+    if client_row and client_row.client_id:
+        client_id_for_upload = client_row.client_id
+    
+    # Create upload record early so we can log all API calls with upload_id
+    upload = SalesOrderUpload(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        client_id=client_id_for_upload,  # May be None for standalone connections
+        client_erp_credentials_id=client_uuid,
+        filename=filename,
+        total_rows=len(rows),
+        successful_orders=0,
+        failed_orders=0,
+        status='pending'  # Will be updated to 'processing' when create is called
+    )
+    db.session.add(upload)
+    db.session.commit()
+    
     # Create session
     session_id = str(uuid.uuid4())
     upload_sessions[session_id] = {
         'user_id': user_id,
         'client_id': client_uuid,  # This is actually client_erp_credentials_id
         'client_erp_credentials_id': client_uuid,
+        'upload_id': upload.id,  # Store upload_id in session for API logging
         'filename': filename,
         'rows': rows,
         'detected_mappings': detected_mappings,
@@ -438,7 +467,14 @@ def validate_data():
     # This is the ID that identifies which credentials are being used
     credential_id_for_logging = client_erp_credentials_id
     
-    logger.info(f"DEBUG: Using credential_id {credential_id_for_logging} for API logging")
+    # Get upload_id from session (should exist if upload was created)
+    upload_id = session.get('upload_id')
+    
+    if not upload_id:
+        logger.warning(f"WARNING: upload_id not found in session! Session keys: {list(session.keys())}")
+        logger.warning("This may be an old session created before the fix. API calls will be logged without upload_id.")
+    
+    logger.info(f"DEBUG: Using credential_id {credential_id_for_logging} for API logging, upload_id: {upload_id}")
     
     # Create logging callback for validation API calls
     def log_api_call(endpoint, method, request_url, request_headers, request_body,
@@ -451,7 +487,8 @@ def validate_data():
                     id=uuid.uuid4(),
                     client_id=credential_id_for_logging,
                     user_id=user_id,
-                    upload_id=None,
+                    upload_id=upload_id,  # Use upload_id from session
+                    order_id=None,  # Validation doesn't have specific order_id
                     trigger='validation',
                     endpoint=endpoint,
                     method=method,
@@ -474,7 +511,7 @@ def validate_data():
                         id=uuid.uuid4(),
                         client_id=credential_id_for_logging,
                         user_id=user_id,
-                        upload_id=None,
+                        upload_id=upload_id,  # Use upload_id from session
                         endpoint=endpoint,
                         method=method,
                         request_url=request_url,
@@ -490,7 +527,7 @@ def validate_data():
                 else:
                     raise
             
-            logger.info(f"✓ Logged API call: {method} {endpoint} - Status: {response_status}, credential_id: {credential_id_for_logging}, user_id: {user_id}, trigger: validation")
+            logger.info(f"✓ Logged API call: {method} {endpoint} - Status: {response_status}, credential_id: {credential_id_for_logging}, user_id: {user_id}, upload_id: {upload_id}, trigger: validation")
         except Exception as e:
             logger.error(f"✗ Error logging API call: {str(e)}")
             import traceback
@@ -717,29 +754,30 @@ def create_sales_orders():
     # Get credential_id for logging (from client_erp_credentials)
     credential_id_for_logging = client_erp_credentials_id
     
-    # Get client_id for upload record (may be None for standalone connections)
-    client_id_for_upload = None
-    if client_row and client_row.client_id:
-        client_id_for_upload = client_row.client_id
+    # Get existing upload record from session (created during CSV upload)
+    upload_id = session.get('upload_id')
+    if not upload_id:
+        return jsonify({'error': 'Upload record not found in session. Please re-upload your CSV file.'}), 400
     
-    # Create upload record first (client_id can be None for standalone connections)
-    upload = SalesOrderUpload(
-        id=uuid.uuid4(),
-        user_id=user_id,
-        client_id=client_id_for_upload,  # May be None
-        filename=session['filename'],
-        total_rows=len(session['rows']),
-        successful_orders=0,
-        failed_orders=0,
-        status='processing'
-    )
-    db.session.add(upload)
+    # Retrieve the existing upload record
+    upload = SalesOrderUpload.query.get(upload_id)
+    if not upload:
+        return jsonify({'error': 'Upload record not found in database'}), 404
+    
+    # Update upload status to processing
+    upload.status = 'processing'
     db.session.commit()
+    # Emit event for real-time updates
+    from routes.webhooks import emit_upload_event
+    emit_upload_event('upload_status_changed', str(upload.id), str(upload.client_id) if upload.client_id else None)
     
     # Create logging callback (after upload is created)
     def log_api_call(endpoint, method, request_url, request_headers, request_body,
                      response_status, response_body, error_message, duration_ms):
         """Callback to log API calls to database"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"log_api_call invoked: {method} {endpoint}, upload_id: {upload.id}, response_status: {response_status}")
         try:
             # Create log entry - handle trigger column gracefully if it doesn't exist yet
             # Create log entry - try with trigger first, fallback without if column doesn't exist
@@ -749,6 +787,7 @@ def create_sales_orders():
                     client_id=credential_id_for_logging,
                     user_id=user_id,
                     upload_id=upload.id,
+                    order_id=None,  # Sales.py flow doesn't create SalesOrderResult records
                     trigger='upload',
                     endpoint=endpoint,
                     method=method,
@@ -762,6 +801,7 @@ def create_sales_orders():
                 )
                 db.session.add(log_entry)
                 db.session.commit()
+                logger.info(f"✓ Successfully logged API call: {method} {endpoint} - Status: {response_status}, upload_id: {upload.id}")
             except Exception as trigger_error:
                 # If trigger column doesn't exist, try without it
                 error_str = str(trigger_error).lower()
@@ -784,20 +824,25 @@ def create_sales_orders():
                     )
                     db.session.add(log_entry)
                     db.session.commit()
+                    logger.info(f"✓ Successfully logged API call (fallback): {method} {endpoint} - Status: {response_status}, upload_id: {upload.id}")
                 else:
                     raise
         except Exception as e:
-            print(f"Error logging API call: {str(e)}")
+            logger.error(f"✗ Error logging API call: {str(e)}", exc_info=True)
             # Don't fail the request if logging fails
             db.session.rollback()
     
     # Initialize API client and builder with logging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Initializing API client with logger_callback for upload_id: {upload.id}")
     api_client = Cin7SalesAPI(
         account_id=str(account_id),
         application_key=str(application_key),
         base_url='https://inventory.dearsystems.com/ExternalApi/v2/',
         logger_callback=log_api_call
     )
+    logger.info(f"API client initialized - logger_callback set: {api_client.logger_callback is not None}")
     
     # Update builder with API client
     builder.api_client = api_client
@@ -1006,6 +1051,17 @@ def get_cached_customers():
     ).all()
     
     customers = []
+    # Use the known API response order (from backend logs, this is the actual order)
+    # This is the order we captured when storing, so we should use it when retrieving
+    api_customer_key_order = [
+        'ID', 'Name', 'DisplayName', 'Currency', 'PaymentTerm', 'Discount', 'TaxRule', 'Carrier',
+        'SalesRepresentative', 'Location', 'Comments', 'AccountReceivable', 'RevenueAccount', 'PriceTier',
+        'TaxNumber', 'AdditionalAttribute1', 'AdditionalAttribute2', 'AdditionalAttribute3', 'AdditionalAttribute4',
+        'AdditionalAttribute5', 'AdditionalAttribute6', 'AdditionalAttribute7', 'AdditionalAttribute8',
+        'AdditionalAttribute9', 'AdditionalAttribute10', 'AttributeSet', 'Tags', 'Status', 'CreditLimit',
+        'IsOnCreditHold', 'LastModifiedOn', 'Addresses', 'Contacts', 'ProductPrices'
+    ]
+    
     for cached in cached_customers:
         customer_data = cached.customer_data
         if customer_data:
@@ -1020,7 +1076,23 @@ def get_cached_customers():
                 ]).lower()
                 if search_query not in searchable_text:
                     continue
-            customers.append(customer_data)
+            
+            # Reorder customer_data to match API response order
+            if isinstance(customer_data, dict):
+                ordered_customer = OrderedDict()
+                # Add keys in API response order
+                for key in api_customer_key_order:
+                    if key in customer_data:
+                        ordered_customer[key] = customer_data[key]
+                # Add any additional keys that weren't in the standard order (preserve their relative order)
+                seen_keys = set(api_customer_key_order)
+                for key, value in customer_data.items():
+                    if key not in seen_keys:
+                        ordered_customer[key] = value
+                        seen_keys.add(key)
+                customers.append(dict(ordered_customer))  # Convert to dict (preserves order in Python 3.7+)
+            else:
+                customers.append(customer_data)
     
     # Get last updated timestamp
     last_updated = None
@@ -1057,11 +1129,39 @@ def get_cached_products():
     from database import CachedProduct
     search_query = request.args.get('search', '').strip().lower()
     
+    # First check count
+    product_count = CachedProduct.query.filter_by(
+        client_erp_credentials_id=client_uuid
+    ).count()
+    current_app.logger.info(f"Query found {product_count} cached products for client {client_uuid}")
+    
     cached_products = CachedProduct.query.filter_by(
         client_erp_credentials_id=client_uuid
     ).all()
     
+    current_app.logger.info(f"Retrieved {len(cached_products)} cached product records for client {client_uuid}")
+    
     products = []
+    # Use the known API response order (from backend logs, this is the actual order)
+    # This is the order we captured when storing, so we should use it when retrieving
+    api_product_key_order = [
+        'ID', 'SKU', 'Name', 'Category', 'Brand', 'Type', 'CostingMethod', 'DropShipMode', 'DefaultLocation',
+        'Length', 'Width', 'Height', 'Weight', 'UOM', 'WeightUnits', 'DimensionsUnits', 'Barcode',
+        'MinimumBeforeReorder', 'ReorderQuantity', 'PriceTier1', 'PriceTier2', 'PriceTier3', 'PriceTier4',
+        'PriceTier5', 'PriceTier6', 'PriceTier7', 'PriceTier8', 'PriceTier9', 'PriceTier10', 'PriceTiers',
+        'AverageCost', 'ShortDescription', 'InternalNote', 'Description', 'AdditionalAttribute1',
+        'AdditionalAttribute2', 'AdditionalAttribute3', 'AdditionalAttribute4', 'AdditionalAttribute5',
+        'AdditionalAttribute6', 'AdditionalAttribute7', 'AdditionalAttribute8', 'AdditionalAttribute9',
+        'AdditionalAttribute10', 'AttributeSet', 'DiscountRule', 'Tags', 'Status', 'StockLocator',
+        'COGSAccount', 'RevenueAccount', 'ExpenseAccount', 'InventoryAccount', 'PurchaseTaxRule',
+        'SaleTaxRule', 'LastModifiedOn', 'Sellable', 'PickZones', 'BillOfMaterial', 'AutoAssembly',
+        'AutoDisassembly', 'QuantityToProduce', 'AlwaysShowQuantity', 'AssemblyInstructionURL',
+        'AssemblyCostEstimationMethod', 'Suppliers', 'ReorderLevels', 'BillOfMaterialsProducts',
+        'BillOfMaterialsServices', 'Movements', 'Attachments', 'BOMType', 'WarrantyName', 'CustomPrices',
+        'CartonHeight', 'CartonWidth', 'CartonLength', 'CartonQuantity', 'CartonInnerQuantity', 'HSCode',
+        'CountryOfOrigin', 'CountryOfOriginCode', 'CreatedDate'
+    ]
+    
     for cached in cached_products:
         product_data = cached.product_data
         if product_data:
@@ -1076,7 +1176,25 @@ def get_cached_products():
                 ]).lower()
                 if search_query not in searchable_text:
                     continue
-            products.append(product_data)
+            
+            # Reorder product_data to match API response order
+            if isinstance(product_data, dict):
+                ordered_product = OrderedDict()
+                # Add keys in API response order
+                for key in api_product_key_order:
+                    if key in product_data:
+                        ordered_product[key] = product_data[key]
+                # Add any additional keys that weren't in the standard order (preserve their relative order)
+                seen_keys = set(api_product_key_order)
+                for key, value in product_data.items():
+                    if key not in seen_keys:
+                        ordered_product[key] = value
+                        seen_keys.add(key)
+                products.append(dict(ordered_product))  # Convert to dict (preserves order in Python 3.7+)
+            else:
+                products.append(product_data)
+        else:
+            current_app.logger.warning(f"Cached product {cached.id} has no product_data")
     
     # Get last updated timestamp
     last_updated = None
@@ -1142,49 +1260,168 @@ def refresh_cache():
         # Get all customers
         customers_response = api_client.get_all_customers()
         if customers_response and isinstance(customers_response, list):
-            # Delete existing cached customers for this client
-            CachedCustomer.query.filter_by(client_erp_credentials_id=client_uuid).delete()
+            # Track which customer IDs we've seen for deletion of stale records
+            seen_customer_ids = set()
             
-            # Cache new customers
+            # Capture key order from first customer (API response order)
+            first_customer_order = None
+            if customers_response and len(customers_response) > 0:
+                first_customer = customers_response[0]
+                if isinstance(first_customer, dict):
+                    first_customer_order = list(first_customer.keys())
+                    current_app.logger.info(f"First customer key order (first 20): {first_customer_order[:20]}")
+                    current_app.logger.info(f"First customer key order (all {len(first_customer_order)}): {first_customer_order}")
+            
+            # Upsert customers (update existing or insert new)
             for customer in customers_response:
                 if customer.get('ID'):
-                    cached = CachedCustomer(
-                        id=uuid.uuid4(),
+                    customer_id = uuid.UUID(str(customer['ID']))
+                    seen_customer_ids.add(customer_id)
+                    
+                    # Reorder customer dict to match API response order if we have it
+                    if first_customer_order and isinstance(customer, dict):
+                        ordered_customer = OrderedDict()
+                        # Add keys in original API order
+                        for key in first_customer_order:
+                            if key in customer:
+                                ordered_customer[key] = customer[key]
+                        # Add any additional keys that weren't in first customer
+                        for key, value in customer.items():
+                            if key not in ordered_customer:
+                                ordered_customer[key] = value
+                        customer = dict(ordered_customer)  # Convert back to regular dict (preserves order in Python 3.7+)
+                    
+                    # Check if customer already exists
+                    existing = CachedCustomer.query.filter_by(
                         client_erp_credentials_id=client_uuid,
-                        cin7_customer_id=uuid.UUID(str(customer['ID'])),
-                        customer_data=customer
-                    )
-                    db.session.add(cached)
+                        cin7_customer_id=customer_id
+                    ).first()
+                    
+                    if existing:
+                        # Update existing record
+                        existing.customer_data = customer
+                        existing.updated_at = datetime.utcnow()
+                        # cached_at stays the same (when it was first cached)
+                    else:
+                        # Insert new record
+                        cached = CachedCustomer(
+                            id=uuid.uuid4(),
+                            client_erp_credentials_id=client_uuid,
+                            cin7_customer_id=customer_id,
+                            customer_data=customer
+                        )
+                        db.session.add(cached)
                     customer_count += 1
             
+            # Delete customers that are no longer in Cin7 (exist in cache but not in API response)
+            if seen_customer_ids:
+                deleted_count = CachedCustomer.query.filter(
+                    CachedCustomer.client_erp_credentials_id == client_uuid,
+                    ~CachedCustomer.cin7_customer_id.in_(seen_customer_ids)
+                ).delete(synchronize_session=False)
+                current_app.logger.info(f"Deleted {deleted_count} stale cached customers for client {client_uuid}")
+            else:
+                # If no customers were seen, delete all (API returned empty)
+                deleted_count = CachedCustomer.query.filter_by(client_erp_credentials_id=client_uuid).delete()
+                current_app.logger.info(f"Deleted {deleted_count} cached customers (API returned no customers)")
+            
             db.session.commit()
+            current_app.logger.info(f"Successfully cached {customer_count} customers for client {client_uuid}")
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Error refreshing customers: {str(e)}")
     
     try:
         # Get all products
+        current_app.logger.info(f"Starting product refresh for client {client_uuid}")
         products_response = api_client.get_all_products()
+        current_app.logger.info(f"Received {len(products_response) if products_response else 0} products from API")
+        
         if products_response and isinstance(products_response, list):
-            # Delete existing cached products for this client
-            CachedProduct.query.filter_by(client_erp_credentials_id=client_uuid).delete()
+            # Track which product IDs we've seen for deletion of stale records
+            seen_product_ids = set()
             
-            # Cache new products
+            # Capture key order from first product (API response order)
+            first_product_order = None
+            if products_response and len(products_response) > 0:
+                first_product = products_response[0]
+                if isinstance(first_product, dict):
+                    first_product_order = list(first_product.keys())
+                    current_app.logger.info(f"First product key order (first 20): {first_product_order[:20]}")
+                    current_app.logger.info(f"First product key order (all {len(first_product_order)}): {first_product_order}")
+            
+            # Upsert products (update existing or insert new)
             for product in products_response:
                 if product.get('ID'):
-                    cached = CachedProduct(
-                        id=uuid.uuid4(),
+                    product_id = uuid.UUID(str(product['ID']))
+                    seen_product_ids.add(product_id)
+                    
+                    # Extract SKU from product data, use empty string if not present
+                    sku = product.get('SKU') or ''
+                    if not sku:
+                        current_app.logger.warning(f"Product {product_id} has no SKU, using empty string")
+                    
+                    # Reorder product dict to match API response order if we have it
+                    if first_product_order and isinstance(product, dict):
+                        ordered_product = OrderedDict()
+                        # Add keys in original API order
+                        for key in first_product_order:
+                            if key in product:
+                                ordered_product[key] = product[key]
+                        # Add any additional keys that weren't in first product
+                        for key, value in product.items():
+                            if key not in ordered_product:
+                                ordered_product[key] = value
+                        product = dict(ordered_product)  # Convert back to regular dict (preserves order in Python 3.7+)
+                    
+                    # Use PostgreSQL ON CONFLICT for efficient upsert
+                    # Check if product already exists
+                    existing = CachedProduct.query.filter_by(
                         client_erp_credentials_id=client_uuid,
-                        cin7_product_id=uuid.UUID(str(product['ID'])),
-                        product_data=product
-                    )
-                    db.session.add(cached)
+                        cin7_product_id=product_id
+                    ).first()
+                    
+                    if existing:
+                        # Update existing record
+                        existing.sku = sku
+                        existing.product_data = product
+                        existing.updated_at = datetime.utcnow()
+                        # cached_at stays the same (when it was first cached)
+                    else:
+                        # Insert new record
+                        cached = CachedProduct(
+                            id=uuid.uuid4(),
+                            client_erp_credentials_id=client_uuid,
+                            cin7_product_id=product_id,
+                            sku=sku,
+                            product_data=product
+                        )
+                        db.session.add(cached)
                     product_count += 1
             
+            # Delete products that are no longer in Cin7 (exist in cache but not in API response)
+            if seen_product_ids:
+                deleted_count = CachedProduct.query.filter(
+                    CachedProduct.client_erp_credentials_id == client_uuid,
+                    ~CachedProduct.cin7_product_id.in_(seen_product_ids)
+                ).delete(synchronize_session=False)
+                current_app.logger.info(f"Deleted {deleted_count} stale cached products for client {client_uuid}")
+            else:
+                # If no products were seen, delete all (API returned empty)
+                deleted_count = CachedProduct.query.filter_by(client_erp_credentials_id=client_uuid).delete()
+                current_app.logger.info(f"Deleted {deleted_count} cached products (API returned no products)")
+            
             db.session.commit()
+            current_app.logger.info(f"Successfully cached {product_count} products for client {client_uuid}")
+            
+            # Verify they were saved
+            verify_count = CachedProduct.query.filter_by(client_erp_credentials_id=client_uuid).count()
+            current_app.logger.info(f"Verification: Found {verify_count} products in database after commit for client {client_uuid}")
+        else:
+            current_app.logger.warning(f"Products response was not a list or was empty: {type(products_response)}")
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Error refreshing products: {str(e)}")
+        current_app.logger.error(f"Error refreshing products: {str(e)}", exc_info=True)
     
     return jsonify({
         'customer_count': customer_count,

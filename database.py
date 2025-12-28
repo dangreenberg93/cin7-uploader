@@ -133,7 +133,7 @@ class SalesOrderUpload(db.Model):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)  # nullable for webhook uploads
     client_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client.id'), nullable=True, index=True)  # nullable for webhook uploads
-    client_erp_credentials_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.client_erp_credentials.id'), nullable=True, index=True)
+    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # References voyager.client_erp_credentials.id (no FK constraint - cross-schema)
     filename = Column(String(500), nullable=False)
     total_rows = Column(Integer, nullable=False)
     successful_orders = Column(Integer, default=0, nullable=False)
@@ -168,6 +168,7 @@ class SalesOrderResult(db.Model):
     
     # Review tracking
     reviewed = Column(Boolean, default=False, nullable=False, index=True)  # Whether this result has been reviewed
+    review_notes = Column(Text, nullable=True)  # Notes/comment when order is reviewed
     
     # Task tracking for retries and resolution
     retry_count = Column(Integer, default=0, nullable=False)
@@ -192,6 +193,7 @@ class Cin7ApiLog(db.Model):
     client_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # Actually stores credential_id!
     user_id = Column(UUID(as_uuid=True), ForeignKey('fireflies.users.id'), nullable=True, index=True)
     upload_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_upload.id'), nullable=True, index=True)
+    order_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_result.id'), nullable=True, index=True)  # Specific order this API call is for
     
     # Trigger/source of the API call
     trigger = Column(String(50), nullable=True, index=True)  # "validation", "upload", "connection_test", etc.
@@ -252,6 +254,7 @@ class CachedProduct(db.Model):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
     cin7_product_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    sku = Column(String(255), nullable=False, index=True)
     product_data = Column(JSON, nullable=False)
     cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

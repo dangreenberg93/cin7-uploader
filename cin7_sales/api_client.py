@@ -1650,6 +1650,104 @@ class Cin7SalesAPI:
                 )
             return (False, error_msg, None)
     
+    def search_sales_by_po(self, po_number: str) -> Tuple[bool, str, List[Dict[str, Any]]]:
+        """
+        Search for sales by CustomerReference (PO number) using the saleList endpoint.
+        
+        The Search parameter searches in: OrderNumber, Status, Customer, invoiceNumber, 
+        CustomerReference, CreditNoteNumber
+        
+        Args:
+            po_number: PO number (CustomerReference) to search for
+        
+        Returns:
+            (success, message, list_of_sales)
+        """
+        self._rate_limit()
+        url = f"{self.base_url}/saleList"
+        endpoint = "/saleList"
+        method = "GET"
+        params = {
+            "Search": po_number,
+            "Page": 1,
+            "Limit": 100  # Get up to 100 results
+        }
+        start_time = time.time()
+        
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            # Log the API call
+            response_body = None
+            error_message = None
+            try:
+                response_body = response.json() if response.content else None
+            except:
+                response_body = response.text[:1000] if response.text else None
+            
+            if response.status_code != 200:
+                error_message = f"HTTP {response.status_code}: {response.text[:200] if response.text else 'Unknown error'}"
+            
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=f"{url}?{self._build_query_string(params)}",
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=response.status_code,
+                    response_body=response_body,
+                    error_message=error_message,
+                    duration_ms=duration_ms
+                )
+            
+            if response.status_code == 200:
+                data = response_body if response_body else {}
+                
+                # Check for HTML error page
+                if isinstance(data, str) and '<!DOCTYPE html>' in data:
+                    return (False, "API returned HTML error page", [])
+                
+                # Extract sales from response
+                sales = []
+                if isinstance(data, list):
+                    sales = data
+                elif isinstance(data, dict):
+                    # Try common response keys
+                    sales = data.get("SaleList", data.get("Sales", []))
+                
+                # Filter to only exact CustomerReference matches (search is fuzzy, so we need to filter)
+                exact_matches = []
+                for sale in sales:
+                    customer_ref = sale.get("CustomerReference", "")
+                    if customer_ref and str(customer_ref).strip() == str(po_number).strip():
+                        exact_matches.append(sale)
+                
+                return (True, f"Found {len(exact_matches)} matching sale(s)", exact_matches)
+            
+            return (False, error_message or f"HTTP {response.status_code}", [])
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                safe_headers = {k: v for k, v in dict(self.session.headers).items() 
+                              if k.lower() not in ['api-auth-applicationkey', 'authorization']}
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=f"{url}?{self._build_query_string(params)}" if 'params' in locals() else url,
+                    request_headers=safe_headers,
+                    request_body=None,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return (False, error_msg, [])
+    
     def create_customer_address(self, customer_id: str, address_data: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
         Create a new address for a customer in Cin7.

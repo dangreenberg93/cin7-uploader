@@ -4,7 +4,6 @@ import axios from 'axios';
 import { Toaster } from 'sonner';
 import Login from './components/Login';
 import ResetPassword from './components/ResetPassword';
-import SalesOrderUploader from './components/SalesOrderUploader';
 import Admin from './components/Admin';
 import CsvMappingConfig from './components/CsvMappingConfig';
 import Cin7Settings from './components/Cin7Settings';
@@ -67,8 +66,8 @@ function ActivityLogSidebar() {
     }
   }, [terminalLines, showActivityLog]);
   
-  // Show on home, queue, upload, and data pages
-  const showOnPage = location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/upload' || location.pathname === '/data';
+  // Show on home, queue, and data pages
+  const showOnPage = location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/data';
   if (!showOnPage) {
     return null;
   }
@@ -147,10 +146,7 @@ function AppHeaderContent({ user }) {
       return 'Data';
     }
     if (location.pathname === '/' || location.pathname === '/queue') {
-      return 'Upload Queue';
-    }
-    if (location.pathname === '/upload') {
-      return 'Cin7 Uploader';
+      return 'Sales Orders';
     }
     return 'Cin7 Uploader';
   };
@@ -169,12 +165,9 @@ function AppHeaderContent({ user }) {
       return 'View customer and product data';
     }
     if (location.pathname === '/' || location.pathname === '/queue') {
-      return 'View order processing results from email webhooks';
+      return 'Manage Sales Orders uploads from CSV files to Cin7';
     }
-    if (location.pathname === '/upload') {
-      return 'Upload CSV files and create sales orders in Cin7';
-    }
-    return 'Upload CSV files and create sales orders in Cin7';
+    return 'Cin7 Uploader';
   };
 
   return (
@@ -185,7 +178,7 @@ function AppHeaderContent({ user }) {
         <span className="text-xs text-muted-foreground hidden md:inline">{getPageDescription()}</span>
       </nav>
       <div className="flex-1" />
-      {(location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/upload' || location.pathname === '/data') && selectedClient && (
+      {(location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/data') && selectedClient && (
         <>
           {connected ? (
             <div className="flex items-center gap-2">
@@ -205,7 +198,7 @@ function AppHeaderContent({ user }) {
           )}
         </>
       )}
-      {((location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/upload' || location.pathname === '/data') || isAdmin) && !showActivityLog && (
+      {((location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/data') || isAdmin) && !showActivityLog && (
         <Button
           variant="ghost"
           size="icon"
@@ -365,7 +358,6 @@ function AppContent() {
                   <main className="flex flex-1 flex-col overflow-y-auto bg-white rounded-b-md min-h-0 min-w-0">
                     <Routes>
                       <Route path="/" element={<QueueView />} />
-                      <Route path="/upload" element={<SalesOrderUploader user={user} />} />
                       <Route path="/queue" element={<QueueView />} />
                       <Route path="/data" element={<DataView />} />
                       <Route path="/mappings" element={<CsvMappingConfig />} />

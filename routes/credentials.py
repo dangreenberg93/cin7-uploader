@@ -618,12 +618,9 @@ def test_credentials(client_id):
                     except:
                         pass  # Keep as string if not JSON
                 
-                # If response_body is a string (raw JSON), store it in raw_response_body_text
-                # and parse it for response_body column
-                raw_response_text = None
+                # Parse response_body if it's a string (raw JSON)
                 parsed_response_body = response_body
                 if isinstance(response_body, str):
-                    raw_response_text = response_body
                     try:
                         import json
                         parsed_response_body = json.loads(response_body)
@@ -647,7 +644,6 @@ def test_credentials(client_id):
                     request_body=request_body,
                     response_status=response_status,
                     response_body=parsed_response_body,
-                    raw_response_body_text=raw_response_text,
                     error_message=error_message,
                     duration_ms=duration_ms
                 )
