@@ -2239,8 +2239,8 @@ const QueueView = () => {
                   <TableHead className="text-xs font-semibold h-8 py-1">Actions</TableHead>
                 </TableRow>
               </TableHeader>
-              <TableBody>
-                {filteredAndSortedUploads.map((upload) => {
+              <TableBody className="[&_tr:last-child]:!border-b [&_tr:last-child_td]:!border-b">
+                {filteredAndSortedUploads.map((upload, index) => {
                   const isExpanded = expandedUploads.has(upload.id);
                   // Count partial_success as failed, not successful
                   const successfulOrders = upload.order_results?.filter(or => 
@@ -2250,10 +2250,12 @@ const QueueView = () => {
                     or.status === 'failed' || or.error_type === 'partial_success'
                   ) || [];
                   
+                  const isLastDataRow = index === filteredAndSortedUploads.length - 1;
+                  
                   return (
                     <React.Fragment key={upload.id}>
                       <TableRow 
-                        className="cursor-pointer hover:bg-muted/50"
+                        className={`cursor-pointer hover:bg-muted/50 ${isLastDataRow ? '!border-b' : ''}`}
                         onClick={() => {
                           const newExpanded = new Set(expandedUploads);
                           if (newExpanded.has(upload.id)) {
@@ -2264,7 +2266,7 @@ const QueueView = () => {
                           setExpandedUploads(newExpanded);
                         }}
                       >
-                        <TableCell onClick={(e) => e.stopPropagation()}>
+                        <TableCell onClick={(e) => e.stopPropagation()} className={isLastDataRow ? '!border-b' : ''}>
                           <div className="flex items-center gap-2">
                             <FileText className="h-4 w-4 text-muted-foreground" />
                             <span className="font-medium">{upload.filename}</span>
@@ -2283,18 +2285,18 @@ const QueueView = () => {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell>{formatDate(upload.created_at)}</TableCell>
-                        <TableCell>
+                        <TableCell className={isLastDataRow ? '!border-b' : ''}>{formatDate(upload.created_at)}</TableCell>
+                        <TableCell className={isLastDataRow ? '!border-b' : ''}>
                           {(() => {
                             // Show "Processing" only if status is processing, otherwise show "Processed"
                             const displayStatus = upload.status === 'processing' ? 'processing' : 'processed';
                             return getStatusBadge(displayStatus);
                           })()}
                         </TableCell>
-                        <TableCell className="text-right">{upload.order_results?.length || 0}</TableCell>
-                        <TableCell className="text-right text-green-600">{successfulOrders.length}</TableCell>
-                        <TableCell className="text-right text-red-600">{failedOrdersForUpload.length}</TableCell>
-                        <TableCell onClick={(e) => e.stopPropagation()}>
+                        <TableCell className={`text-right ${isLastDataRow ? '!border-b' : ''}`}>{upload.order_results?.length || 0}</TableCell>
+                        <TableCell className={`text-right text-green-600 ${isLastDataRow ? '!border-b' : ''}`}>{successfulOrders.length}</TableCell>
+                        <TableCell className={`text-right text-red-600 ${isLastDataRow ? '!border-b' : ''}`}>{failedOrdersForUpload.length}</TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()} className={isLastDataRow ? '!border-b' : ''}>
                           <div className="flex items-center gap-2">
                             <Button
                               variant="ghost"
@@ -2529,24 +2531,25 @@ const QueueView = () => {
                         <TableHead className="text-xs font-semibold w-auto sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l text-center h-8 py-1" style={{ borderLeft: '1px solid hsl(var(--border))' }}>Actions</TableHead>
                       </TableRow>
                     </TableHeader>
-                    <TableBody>
-                      {filteredAndSortedFailedOrders.map((order) => {
+                    <TableBody className="[&_tr:last-child]:!border-b [&_tr:last-child_td]:!border-b">
+                      {filteredAndSortedFailedOrders.map((order, index) => {
                         const isSelected = selectedOrderIds.has(order.id);
+                        const isLastRow = index === filteredAndSortedFailedOrders.length - 1;
                         
                         return (
                           <TableRow 
                             key={order.id}
-                            className="hover:bg-muted/50 group"
+                            className={`hover:bg-muted/50 group ${isLastRow ? '!border-b' : ''}`}
                           >
                               {failedFilterTab === 'needs-review' && (
-                                <TableCell className="text-xs" onClick={(e) => { e.stopPropagation(); }}>
+                                <TableCell className={`text-xs ${isLastRow ? '!border-b' : ''}`} onClick={(e) => { e.stopPropagation(); }}>
                                   <Checkbox
                                     checked={isSelected}
                                     onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
                                   />
                                 </TableCell>
                               )}
-                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center">
+                              <TableCell onClick={(e) => e.stopPropagation()} className={`cursor-default text-center ${isLastRow ? '!border-b' : ''}`}>
                                 <button
                                   onClick={() => markFailedOrderAsReviewed(order.id, !order.resolved_at)}
                                   className="hover:opacity-80 transition-opacity inline-flex items-center justify-center"
@@ -2561,16 +2564,16 @@ const QueueView = () => {
                                   )}
                                 </button>
                               </TableCell>
-                              <TableCell className="text-xs">
+                              <TableCell className={`text-xs ${isLastRow ? '!border-b' : ''}`}>
                                 <span className="font-medium">{order.order_key}</span>
                               </TableCell>
-                              <TableCell className="text-xs whitespace-nowrap">
+                              <TableCell className={`text-xs whitespace-nowrap ${isLastRow ? '!border-b' : ''}`}>
                                 {order.customer_name || '-'}
                               </TableCell>
-                              <TableCell className="text-xs">
+                              <TableCell className={`text-xs ${isLastRow ? '!border-b' : ''}`}>
                                 {order.po_number || '-'}
                               </TableCell>
-                              <TableCell className="text-xs max-w-xs">
+                              <TableCell className={`text-xs max-w-xs ${isLastRow ? '!border-b' : ''}`}>
                                 {order.review_notes ? (
                                   <TooltipProvider>
                                     <Tooltip>
@@ -2588,7 +2591,7 @@ const QueueView = () => {
                                   <span className="text-xs text-gray-400">-</span>
                                 )}
                               </TableCell>
-                              <TableCell className="text-xs whitespace-nowrap">
+                              <TableCell className={`text-xs whitespace-nowrap ${isLastRow ? '!border-b' : ''}`}>
                                 {getErrorTypeBadge(order.error_type)}
                               </TableCell>
                               {/* <TableCell className="text-xs">
@@ -2597,7 +2600,7 @@ const QueueView = () => {
                               {/* <TableCell className="text-xs">
                                 {order.last_retry_at ? formatDate(order.last_retry_at) : '-'}
                               </TableCell> */}
-                              <TableCell className="text-xs whitespace-nowrap">
+                              <TableCell className={`text-xs whitespace-nowrap ${isLastRow ? '!border-b' : ''}`}>
                                 {order.upload ? (
                                   <div>
                                     <div className="font-medium">{order.upload.filename}</div>
@@ -2605,7 +2608,7 @@ const QueueView = () => {
                                   </div>
                                 ) : '-'}
                               </TableCell>
-                              <TableCell className="w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l" style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
+                              <TableCell className={`w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l ${isLastRow ? '!border-b' : ''}`} style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
                                 <div className="flex items-center gap-2 justify-center">
                                   <span
                                     onClick={(e) => {
@@ -2703,7 +2706,7 @@ const QueueView = () => {
                           <TableHead className="text-xs font-semibold w-auto sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l text-center h-8 py-1" style={{ borderLeft: '1px solid hsl(var(--border))' }}>Actions</TableHead>
                         </TableRow>
                       </TableHeader>
-                      <TableBody>
+                      <TableBody className="[&_tr:last-child]:!border-b [&_tr:last-child_td]:!border-b">
                       {filteredAndSortedCompletedOrders.map((order, index) => {
                         const isLastRow = index === filteredAndSortedCompletedOrders.length - 1;
                         // Extract customer and PO from sale_payload if not in order data
@@ -2719,21 +2722,21 @@ const QueueView = () => {
                         return (
                           <TableRow 
                             key={order.id}
-                            className="cursor-pointer hover:bg-muted/50 group"
+                            className={`cursor-pointer hover:bg-muted/50 group ${isLastRow ? '!border-b' : ''}`}
                             onDoubleClick={() => {
                               setViewingOrderDetails(order);
                               setOrderDetailsDialogOpen(true);
                             }}
                           >
                               {reviewFilterTab === 'needs-review' && (
-                                <TableCell onClick={(e) => { e.stopPropagation(); }} className="text-xs">
+                                <TableCell onClick={(e) => { e.stopPropagation(); }} className={`text-xs ${isLastRow ? '!border-b' : ''}`}>
                                   <Checkbox
                                     checked={isSelected}
                                     onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
                                   />
                                 </TableCell>
                               )}
-                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center">
+                              <TableCell onClick={(e) => e.stopPropagation()} className={`cursor-default text-center ${isLastRow ? '!border-b' : ''}`}>
                                 <button
                                   onClick={() => markOrderAsReviewed(order.id, !order.reviewed)}
                                   className="hover:opacity-80 transition-opacity inline-flex items-center justify-center"
@@ -2748,13 +2751,13 @@ const QueueView = () => {
                                   )}
                                 </button>
                               </TableCell>
-                              <TableCell className="text-xs min-w-[120px]">
+                              <TableCell className={`text-xs min-w-[120px] ${isLastRow ? '!border-b' : ''}`}>
                                 <span className="font-medium">{order.order_key}</span>
                               </TableCell>
-                              <TableCell className="text-xs whitespace-nowrap min-w-[180px]">
+                              <TableCell className={`text-xs whitespace-nowrap min-w-[180px] ${isLastRow ? '!border-b' : ''}`}>
                                 {customerName}
                               </TableCell>
-                              <TableCell className="text-xs min-w-[120px]" onClick={(e) => e.stopPropagation()}>
+                              <TableCell className={`text-xs min-w-[120px] ${isLastRow ? '!border-b' : ''}`} onClick={(e) => e.stopPropagation()}>
                                 {order.sale_id ? (
                                   <a
                                     href={`https://inventory.dearsystems.com/Sale#${order.sale_id}`}
@@ -2769,10 +2772,10 @@ const QueueView = () => {
                                   poNumber
                                 )}
                               </TableCell>
-                              <TableCell className="text-xs min-w-[110px]">
+                              <TableCell className={`text-xs min-w-[110px] ${isLastRow ? '!border-b' : ''}`}>
                                 {formatDate(order.processed_at)}
                               </TableCell>
-                              <TableCell className="text-xs whitespace-nowrap min-w-[200px]">
+                              <TableCell className={`text-xs whitespace-nowrap min-w-[200px] ${isLastRow ? '!border-b' : ''}`}>
                                 {order.upload ? (
                                   <div>
                                     <div className="font-medium">{order.upload.filename}</div>
@@ -2780,7 +2783,7 @@ const QueueView = () => {
                                   </div>
                                 ) : '-'}
                               </TableCell>
-                              <TableCell className="w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l" style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
+                              <TableCell className={`w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l ${isLastRow ? '!border-b' : ''}`} style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
                                 <div className="flex items-center gap-2 justify-center">
                                   <span
                                     onClick={(e) => {
