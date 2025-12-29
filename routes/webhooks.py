@@ -1209,11 +1209,56 @@ def process_single_order(
                     else:
                         # Check if product already exists (409 error)
                         if '409' in str(create_message) or 'already exists' in str(create_message).lower():
-                            logger.info(f"Product SKU '{sku}' already exists (409), attempting to look it up")
-                            # Try to look up the existing product using API search
-                            try:
-                                products = api_client.search_product(sku=sku)
-                                if products and len(products) > 0:
+                            logger.info(f"Product SKU '{sku}' already exists (409), checking cache first...")
+                            
+                            # Check if product is already in our database cache
+                            from database import CachedProduct
+                            cached_product = CachedProduct.query.filter_by(
+                                client_erp_credentials_id=credential_id_for_logging,
+                                sku=sku
+                            ).first()
+                            
+                            if cached_product and cached_product.product_data:
+                                # Use cached product data - no need for API call
+                                existing_product = cached_product.product_data
+                                product_id = existing_product.get('ID')
+                                if product_id:
+                                    try:
+                                        product_id_uuid = uuid.UUID(str(product_id))
+                                        
+                                        # Update builder's preloaded_products so it can be found immediately
+                                        sku_clean = sku.strip()
+                                        builder.preloaded_products[sku_clean] = existing_product
+                                        builder.preloaded_products[sku_clean.upper()] = existing_product
+                                        builder.preloaded_products[sku_clean.lower()] = existing_product
+                                        # Clear any cached None entries and update cache with the existing product
+                                        if sku_clean in builder._product_cache:
+                                            del builder._product_cache[sku_clean]
+                                        if sku in builder._product_cache:
+                                            del builder._product_cache[sku]
+                                        builder._product_cache[sku_clean] = existing_product
+                                        
+                                        # Track product ID for cache refresh (even if already existed)
+                                        auto_created_product_ids.append(product_id_uuid)
+                                        
+                                        # Update matching details
+                                        for p in matching_details['products']:
+                                            if p.get('sku') == sku:
+                                                p['found'] = True
+                                                p['cin7_id'] = product_id
+                                                p['cin7_name'] = existing_product.get('Name')
+                                                p['auto_created'] = False  # Not auto-created, already existed
+                                                break
+                                        
+                                        logger.info(f"Found existing product SKU '{sku}' in cache (ID: {product_id}) - no API call needed")
+                                    except (ValueError, AttributeError):
+                                        logger.error(f"Invalid product ID format in cache: {product_id}")
+                            else:
+                                # Not in cache - need to fetch from API
+                                logger.info(f"Product SKU '{sku}' not in cache, fetching from API...")
+                                try:
+                                    products = api_client.search_product(sku=sku)
+                                    if products and len(products) > 0:
                                     existing_product = products[0]
                                     product_id = existing_product.get('ID')
                                     if product_id:
@@ -2886,9 +2931,19 @@ def process_webhook_csv(
         
         auto_created_product_ids = []
         for sku in all_products_needed:
-            # Always attempt to create products in Phase 1
-            # The API will return 409 if they already exist, which we handle below
-            # This ensures new products are created and flagged correctly
+            # Check if product already exists in cache first (same pattern as customers)
+            product = builder._lookup_product_by_sku(sku)
+            if product:
+                # Product already exists - update builder cache and skip creation
+                logger.info(f"Product SKU '{sku}' already exists in cache, skipping creation")
+                sku_clean = sku.strip()
+                builder.preloaded_products[sku_clean] = product
+                builder.preloaded_products[sku_clean.upper()] = product
+                builder.preloaded_products[sku_clean.lower()] = product
+                builder._product_cache[sku_clean] = product
+                continue
+            
+            # Product not found - create it
             logger.info(f"Auto-creating product with SKU '{sku}'...")
             
             # #region agent log
@@ -3058,31 +3113,60 @@ def process_webhook_csv(
                                 except Exception as e:
                                     logger.error(f"Error refreshing product cache for SKU '{sku}': {str(e)}", exc_info=True)
                 elif '409' in str(create_message) or 'already exists' in str(create_message).lower():
-                    # Product already exists - look it up and cache it
-                    logger.info(f"Product SKU '{sku}' already exists in Cin7, looking it up...")
-                    try:
-                        products = api_client.search_product(sku=sku)
-                        if products and len(products) > 0:
-                            existing_product = products[0]
-                            product_id = existing_product.get('ID')
-                            if product_id:
-                                try:
-                                    product_id_uuid = uuid.UUID(str(product_id))
-                                    from routes.sales import refresh_single_product_cache
-                                    refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, existing_product, is_new=False)
-                                    
-                                    # Update builder cache
-                                    sku_clean = sku.strip()
-                                    builder.preloaded_products[sku_clean] = existing_product
-                                    builder.preloaded_products[sku_clean.upper()] = existing_product
-                                    builder.preloaded_products[sku_clean.lower()] = existing_product
-                                    builder._product_cache[sku_clean] = existing_product
-                                    db.session.commit()
-                                    logger.info(f"✓ Found and cached existing product SKU '{sku}'")
-                                except (ValueError, AttributeError) as e:
-                                    logger.error(f"Invalid product ID format: {product_id} - {str(e)}")
-                    except Exception as e:
-                        logger.error(f"Error looking up existing product: {str(e)}", exc_info=True)
+                    # Product already exists - check cache first before making API call
+                    logger.info(f"Product SKU '{sku}' already exists in Cin7, checking cache first...")
+                    
+                    # Check if product is already in our database cache
+                    from database import CachedProduct
+                    cached_product = CachedProduct.query.filter_by(
+                        client_erp_credentials_id=credential_id_for_logging,
+                        sku=sku
+                    ).first()
+                    
+                    if cached_product and cached_product.product_data:
+                        # Use cached product data - no need for API call
+                        existing_product = cached_product.product_data
+                        product_id = existing_product.get('ID')
+                        if product_id:
+                            try:
+                                product_id_uuid = uuid.UUID(str(product_id))
+                                
+                                # Update builder cache
+                                sku_clean = sku.strip()
+                                builder.preloaded_products[sku_clean] = existing_product
+                                builder.preloaded_products[sku_clean.upper()] = existing_product
+                                builder.preloaded_products[sku_clean.lower()] = existing_product
+                                builder._product_cache[sku_clean] = existing_product
+                                
+                                logger.info(f"✓ Found existing product SKU '{sku}' in cache (ID: {product_id}) - no API call needed")
+                            except (ValueError, AttributeError) as e:
+                                logger.error(f"Invalid product ID format in cache: {product_id} - {str(e)}")
+                    else:
+                        # Not in cache - need to fetch from API
+                        logger.info(f"Product SKU '{sku}' not in cache, fetching from API...")
+                        try:
+                            products = api_client.search_product(sku=sku)
+                            if products and len(products) > 0:
+                                existing_product = products[0]
+                                product_id = existing_product.get('ID')
+                                if product_id:
+                                    try:
+                                        product_id_uuid = uuid.UUID(str(product_id))
+                                        from routes.sales import refresh_single_product_cache
+                                        refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, existing_product, is_new=False)
+                                        
+                                        # Update builder cache
+                                        sku_clean = sku.strip()
+                                        builder.preloaded_products[sku_clean] = existing_product
+                                        builder.preloaded_products[sku_clean.upper()] = existing_product
+                                        builder.preloaded_products[sku_clean.lower()] = existing_product
+                                        builder._product_cache[sku_clean] = existing_product
+                                        db.session.commit()
+                                        logger.info(f"✓ Fetched and cached existing product SKU '{sku}' from API")
+                                    except (ValueError, AttributeError) as e:
+                                        logger.error(f"Invalid product ID format: {product_id} - {str(e)}")
+                        except Exception as e:
+                            logger.error(f"Error looking up existing product: {str(e)}", exc_info=True)
             except Exception as e:
                 logger.error(f"Error auto-creating product SKU '{sku}': {str(e)}", exc_info=True)
                 # Product found in cache - check if it was auto-created in this run
