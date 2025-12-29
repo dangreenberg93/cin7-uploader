@@ -533,6 +533,9 @@ class SalesOrderValidator:
             has_order_id = False
             has_customer = False
             
+            # Initialize customer_col to None (will be set later if needed)
+            customer_col = None
+            
             # Check for Order # or Invoice #
             if invoice_col:
                 invoice_val = row['data'].get(invoice_col) or next((v for k, v in row['data'].items() if k.lower() == invoice_col.lower()), None)

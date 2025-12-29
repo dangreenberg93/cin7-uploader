@@ -915,8 +915,8 @@ const QueueView = () => {
     const isFailedOrders = bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0];
     
     if (bulkReviewMode === 'all') {
-      // Add notes to all orders at once
-      if (!bulkNotes.trim()) {
+      // Only require notes for failed orders, not for synced/completed orders
+      if (isFailedOrders && !bulkNotes.trim()) {
         toast.error('Please enter notes');
         return;
       }
@@ -934,9 +934,9 @@ const QueueView = () => {
                 review_notes: bulkNotes 
               });
             } else {
+              // For synced/completed orders, notes are optional
               await axios.post(`/webhooks/orders/${orderId}/review`, { 
-                reviewed: true,
-                review_notes: bulkNotes 
+                reviewed: true
               });
             }
             return { success: true, orderId };
@@ -1002,7 +1002,8 @@ const QueueView = () => {
       }
     } else {
       // One-by-one mode (existing flow)
-      if (!reviewNotes.trim()) {
+      // Only require notes for failed orders, not for synced/completed orders
+      if (isFailedOrders && !reviewNotes.trim()) {
         toast.error('Please enter review notes');
         return;
       }
@@ -1015,9 +1016,9 @@ const QueueView = () => {
             review_notes: reviewNotes 
           });
         } else {
+          // For synced/completed orders, notes are optional
           await axios.post(`/webhooks/orders/${currentOrder.id}/review`, { 
-            reviewed: true,
-            review_notes: reviewNotes 
+            reviewed: true
           });
         }
         
@@ -3391,14 +3392,18 @@ const QueueView = () => {
             {bulkReviewMode === 'all' ? (
               /* All at once mode - simple notes input */
               <div className="space-y-2">
-                <Label htmlFor="bulk-notes">Review Notes *</Label>
+                <Label htmlFor="bulk-notes">
+                  Review Notes {bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0] ? '*' : ''}
+                </Label>
                 <Textarea
                   id="bulk-notes"
-                  placeholder="Enter review notes for all selected orders..."
+                  placeholder={bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0] 
+                    ? "Enter review notes for all selected orders..."
+                    : "Enter review notes (optional)..."}
                   value={bulkNotes}
                   onChange={(e) => setBulkNotes(e.target.value)}
                   className="min-h-[100px]"
-                  required
+                  required={bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0]}
                 />
               </div>
             ) : (
@@ -3422,14 +3427,18 @@ const QueueView = () => {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="bulk-review-notes">Review Notes *</Label>
+                  <Label htmlFor="bulk-review-notes">
+                    Review Notes {bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0] ? '*' : ''}
+                  </Label>
                   <Textarea
                     id="bulk-review-notes"
                     className="min-h-[100px]"
                     value={reviewNotes}
                     onChange={(e) => setReviewNotes(e.target.value)}
-                    placeholder="Enter review notes or select a preset above"
-                    required
+                    placeholder={bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0]
+                      ? "Enter review notes or select a preset above"
+                      : "Enter review notes (optional) or select a preset above"}
+                    required={bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0]}
                   />
                 </div>
               </>
@@ -3448,7 +3457,9 @@ const QueueView = () => {
             </Button>
             <Button 
               onClick={submitBulkReview} 
-              disabled={bulkReviewMode === 'all' ? !bulkNotes.trim() : !reviewNotes.trim()}
+              disabled={bulkReviewMode === 'all' 
+                ? (bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0] && !bulkNotes.trim())
+                : !reviewNotes.trim()}
             >
               {bulkReviewMode === 'all' 
                 ? 'Mark as Reviewed'
