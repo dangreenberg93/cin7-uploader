@@ -81,23 +81,69 @@ def create_app(config_name=None):
     app.register_blueprint(webhooks_bp, url_prefix='/api/webhooks')
     
     # Error handler to ensure CORS headers are included in error responses
+    # Note: 404 handler should NOT catch frontend routes - those are handled by the catch-all route below
     @app.errorhandler(500)
     @app.errorhandler(400)
     @app.errorhandler(403)
-    @app.errorhandler(404)
     def handle_error(error):
+        from flask import jsonify, request
+        # Only return JSON for API routes, not frontend routes
+        if request.path.startswith('/api/'):
+            response = jsonify({
+                'error': str(error.description) if hasattr(error, 'description') else str(error),
+                'code': error.code if hasattr(error, 'code') else 500
+            })
+            response.status_code = error.code if hasattr(error, 'code') else 500
+            # Add CORS headers
+            response.headers.add('Access-Control-Allow-Origin', app.config['CORS_ORIGINS'][0] if app.config['CORS_ORIGINS'] else '*')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response
+        # For non-API routes, let Flask handle it normally (will be caught by catch-all route)
+        from flask import abort
+        abort(error.code if hasattr(error, 'code') else 500)
+    
+    # 404 handler only for API routes
+    @app.errorhandler(404)
+    def handle_404(error):
+        from flask import request
+        path = request.path
+        print(f"404 handler called for path: {path}, static_folder: {app.static_folder}")
+        
+        # Only return JSON for API routes
+        if path.startswith('/api/'):
+            print(f"Returning JSON 404 for API route: {path}")
+            from flask import jsonify
+            response = jsonify({
+                'error': str(error.description) if hasattr(error, 'description') else str(error),
+                'code': 404
+            })
+            response.status_code = 404
+            # Add CORS headers
+            response.headers.add('Access-Control-Allow-Origin', app.config['CORS_ORIGINS'][0] if app.config['CORS_ORIGINS'] else '*')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response
+        
+        # For non-API 404s, serve index.html (React Router will handle routing)
+        # This ensures frontend routes like /reset-password work
+        print(f"Serving index.html for non-API 404: {path}")
+        index_path = os.path.join(app.static_folder, 'index.html')
+        print(f"Checking for index.html at: {index_path}, exists: {os.path.exists(index_path)}")
+        if os.path.exists(index_path):
+            from flask import send_from_directory
+            try:
+                return send_from_directory(app.static_folder, 'index.html')
+            except Exception as e:
+                print(f"Error serving index.html: {e}")
+                from flask import jsonify
+                return jsonify({'error': f'Error serving frontend: {str(e)}', 'code': 500}), 500
+        # If index.html doesn't exist, return the error
+        print(f"index.html not found at: {index_path}")
         from flask import jsonify
-        response = jsonify({
-            'error': str(error.description) if hasattr(error, 'description') else str(error),
-            'code': error.code if hasattr(error, 'code') else 500
-        })
-        response.status_code = error.code if hasattr(error, 'code') else 500
-        # Add CORS headers
-        response.headers.add('Access-Control-Allow-Origin', app.config['CORS_ORIGINS'][0] if app.config['CORS_ORIGINS'] else '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        return response
+        return jsonify({'error': 'Frontend not found', 'code': 404}), 404
     
     # Serve React app - catch-all route for frontend
     # Note: Flask routes are matched by specificity first, so blueprint routes (like /api/sales/validate)
@@ -105,8 +151,10 @@ def create_app(config_name=None):
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')
     def serve(path):
+        print(f"Catch-all route called with path: '{path}'")
         # Skip API routes - they should be handled by blueprints above
         if path.startswith('api/'):
+            print(f"Aborting 404 for API route: {path}")
             from flask import abort
             abort(404)
         
@@ -116,16 +164,24 @@ def create_app(config_name=None):
             static_path = os.path.join(app.static_folder, path)
             if os.path.exists(static_path) and os.path.isfile(static_path):
                 try:
+                    print(f"Serving static file: {path}")
                     return app.send_static_file(path)
-                except:
+                except Exception as e:
+                    print(f"Error serving static file {path}: {e}")
                     pass  # Fall through to serve index.html if static file fails
         
         # For all other routes (including React Router routes like /reset-password),
         # serve index.html so React Router can handle the routing
         index_path = os.path.join(app.static_folder, 'index.html')
+        print(f"Checking index.html at: {index_path}, exists: {os.path.exists(index_path)}")
         if os.path.exists(index_path):
             from flask import send_from_directory
-            return send_from_directory(app.static_folder, 'index.html')
+            print(f"Serving index.html for path: '{path}', static_folder: {app.static_folder}")
+            try:
+                return send_from_directory(app.static_folder, 'index.html')
+            except Exception as e:
+                print(f"Exception serving index.html: {e}")
+                raise
         else:
             # If index.html doesn't exist, return a helpful error
             print(f"index.html not found in static folder: {app.static_folder}")
