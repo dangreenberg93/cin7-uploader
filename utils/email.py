@@ -58,7 +58,7 @@ def send_password_reset_email(email, reset_token):
             margin: 0;
             margin-left: 0;
             margin-right: auto;
-            padding: 40px 20px;
+            padding: 15px 20px;
             background-color: #ffffff;
             text-align: left;
         }}
@@ -67,7 +67,7 @@ def send_password_reset_email(email, reset_token):
             text-align: left;
         }}
         .logo {{
-            max-width: 120px;
+            max-width: 200px;
             height: auto;
             margin-bottom: 24px;
             display: block;
@@ -173,7 +173,6 @@ def send_password_reset_email(email, reset_token):
             <div class="link-text" style="text-align: left;">{reset_link}</div>
             
             <p class="caption" style="font-size: 11px; color: #71717a; font-style: italic; margin: 8px 0 0 0; text-align: left;">This link will expire in 1 hour.</p>
-            <p class="text" style="text-align: left;">If you didn't request this, please ignore this email.</p>
         </div>
         
         <div class="footer" style="text-align: left;">
