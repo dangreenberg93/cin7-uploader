@@ -1301,10 +1301,10 @@ def process_single_order(
                                                         break
                                             except (ValueError, AttributeError):
                                                 logger.error(f"Invalid product ID format: {product_id}")
-                                else:
-                                    logger.warning(f"Product SKU '{sku}' reported as existing but not found in search")
-                            except Exception as e:
-                                logger.error(f"Error looking up existing product SKU '{sku}': {str(e)}", exc_info=True)
+                                    else:
+                                        logger.warning(f"Product SKU '{sku}' reported as existing but not found in search")
+                                except Exception as e:
+                                    logger.error(f"Error looking up existing product SKU '{sku}': {str(e)}", exc_info=True)
                         else:
                             logger.error(f"Failed to auto-create product SKU '{sku}': {create_message}")
                             # Continue - product will be missing from order
