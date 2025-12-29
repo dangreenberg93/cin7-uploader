@@ -1968,12 +1968,13 @@ def refresh_single_customer_cache(client_erp_credentials_id: uuid.UUID, customer
         ).first()
         
         if existing:
-            # Update existing record
+            # Update existing record - preserve is_new flag if it was set
             existing.customer_data = customer_data
             existing.updated_at = datetime.utcnow()
             if is_new:
                 existing.is_new = True
                 existing.created_via_auto_create = True
+            # If is_new=False, preserve existing flag values (don't modify them)
         else:
             # Insert new record
             cached = CachedCustomer(
@@ -2178,10 +2179,17 @@ def refresh_single_product_cache(client_erp_credentials_id: uuid.UUID, product_i
                           })
                 # #endregion
             else:
-                current_app.logger.debug(f"Updated existing product cache for SKU '{sku}' (ID: {product_id}) - flags unchanged")
+                # Preserve existing is_new and created_via_auto_create flags when is_new=False
+                # Don't modify them - they should remain as they were
+                current_app.logger.debug(f"Updated existing product cache for SKU '{sku}' (ID: {product_id}) - flags preserved (is_new={existing.is_new}, created_via_auto_create={existing.created_via_auto_create})")
                 # #region agent log
                 debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
-                          "Flags unchanged (is_new=False)", {"sku": sku, "product_id": str(product_id)})
+                          "Flags preserved (is_new=False)", {
+                              "sku": sku,
+                              "product_id": str(product_id),
+                              "preserved_is_new": existing.is_new,
+                              "preserved_created_via_auto_create": existing.created_via_auto_create
+                          })
                 # #endregion
         else:
             # Insert new record
