@@ -28,3 +28,5 @@ def downgrade():
     # Drop column
     op.drop_column('sales_order_result', 'review_notes', schema='cin7_uploader')
 
+
+

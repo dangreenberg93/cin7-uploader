@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { useClient } from '../contexts/ClientContext';
@@ -7,7 +7,9 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Loader2 } from 'lucide-react';
+import { Switch } from './ui/switch';
+import { Badge } from './ui/badge';
+import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 
 const Cin7Settings = () => {
   const { selectedClientId, selectedClient } = useClient();
@@ -29,6 +31,13 @@ const Cin7Settings = () => {
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [loadingTaxRules, setLoadingTaxRules] = useState(false);
   const [loadingAttributeSets, setLoadingAttributeSets] = useState(false);
+  // Auto-create settings (single combined setting)
+  const [autoCreateCustomersProducts, setAutoCreateCustomersProducts] = useState(false);
+  // Product defaults
+  const [productCostingMethod, setProductCostingMethod] = useState('FIFO');
+  const [productDefaultPriceTier, setProductDefaultPriceTier] = useState('Tier 1');
+  const [productDefaultPrice, setProductDefaultPrice] = useState(0.0);
+  const [productCurrency, setProductCurrency] = useState('USD');
   // Track original values to detect changes
   const [originalValues, setOriginalValues] = useState({
     defaultStatus: 'DRAFT',
@@ -38,7 +47,12 @@ const Cin7Settings = () => {
     customerAccountReceivable: '',
     customerRevenueAccount: '',
     customerTaxRule: '',
-    customerAttributeSet: ''
+    customerAttributeSet: '',
+    autoCreateCustomersProducts: false,
+    productCostingMethod: 'FIFO',
+    productDefaultPriceTier: 'Tier 1',
+    productDefaultPrice: 0.0,
+    productCurrency: 'USD'
   });
 
   useEffect(() => {
@@ -58,6 +72,11 @@ const Cin7Settings = () => {
       setAccounts([]);
       setTaxRules([]);
       setAttributeSets([]);
+      setAutoCreateCustomersProducts(false);
+      setProductCostingMethod('FIFO');
+      setProductDefaultPriceTier('Tier 1');
+      setProductDefaultPrice(0.0);
+      setProductCurrency('USD');
       setOriginalValues({
         defaultStatus: 'DRAFT',
         saleType: '',
@@ -66,7 +85,12 @@ const Cin7Settings = () => {
         customerAccountReceivable: '',
         customerRevenueAccount: '',
         customerTaxRule: '',
-        customerAttributeSet: ''
+        customerAttributeSet: '',
+        autoCreateCustomersProducts: false,
+        productCostingMethod: 'FIFO',
+        productDefaultPriceTier: 'Tier 1',
+        productDefaultPrice: 0.0,
+        productCurrency: 'USD'
       });
     }
   }, [selectedClientId]);
@@ -76,8 +100,9 @@ const Cin7Settings = () => {
 
     setLoading(true);
     try {
-      const response = await axios.get(`/credentials/clients/${selectedClientId}`);
-      const credentials = response.data;
+      // Load credentials
+      const credentialsResponse = await axios.get(`/credentials/clients/${selectedClientId}`);
+      const credentials = credentialsResponse.data;
       
       const loadedDefaultStatus = credentials.default_status || 'DRAFT';
       const loadedSaleType = credentials.sale_type || '';
@@ -96,6 +121,23 @@ const Cin7Settings = () => {
       setCustomerRevenueAccount(loadedCustomerRevenueAccount);
       setCustomerTaxRule(loadedCustomerTaxRule);
       setCustomerAttributeSet(loadedCustomerAttributeSet);
+      
+      // Load auto-create setting from credentials (handle null/undefined explicitly)
+      // Explicitly check for true/false to handle boolean values correctly
+      const loadedAutoCreateCustomersProducts = credentials.auto_create_customers_products === true || credentials.auto_create_customers_products === 'true' || credentials.auto_create_customers_products === 1;
+      console.log('Loaded auto_create_customers_products from credentials:', credentials.auto_create_customers_products, 'type:', typeof credentials.auto_create_customers_products, '->', loadedAutoCreateCustomersProducts);
+      setAutoCreateCustomersProducts(loadedAutoCreateCustomersProducts);
+      
+      // Load product defaults from credentials
+      const loadedProductCostingMethod = credentials.product_costing_method || 'FIFO';
+      const loadedProductDefaultPriceTier = credentials.product_default_price_tier || 'Tier 1';
+      const loadedProductDefaultPrice = credentials.product_default_price !== undefined ? credentials.product_default_price : 0.0;
+      const loadedProductCurrency = credentials.product_currency || 'USD';
+      
+      setProductCostingMethod(loadedProductCostingMethod);
+      setProductDefaultPriceTier(loadedProductDefaultPriceTier);
+      setProductDefaultPrice(loadedProductDefaultPrice);
+      setProductCurrency(loadedProductCurrency);
       
       // Load locations, accounts, and tax rules from Cin7 (don't fail if these error)
       try {
@@ -122,16 +164,21 @@ const Cin7Settings = () => {
         console.error('Failed to load attribute sets (non-fatal):', attrError);
       }
       
-      // Store original values for change detection
+      // Store original values for change detection (convert undefined/null to empty string for consistency)
       setOriginalValues({
         defaultStatus: loadedDefaultStatus,
-        saleType: loadedSaleType,
-        taxRule: loadedTaxRule,
-        defaultLocation: loadedDefaultLocation,
-        customerAccountReceivable: loadedCustomerAccountReceivable,
-        customerRevenueAccount: loadedCustomerRevenueAccount,
-        customerTaxRule: loadedCustomerTaxRule,
-        customerAttributeSet: loadedCustomerAttributeSet
+        saleType: loadedSaleType || '',
+        taxRule: loadedTaxRule || '',
+        defaultLocation: (loadedDefaultLocation || ''),
+        customerAccountReceivable: (loadedCustomerAccountReceivable || ''),
+        customerRevenueAccount: (loadedCustomerRevenueAccount || ''),
+        customerTaxRule: (loadedCustomerTaxRule || ''),
+        customerAttributeSet: (loadedCustomerAttributeSet || ''),
+        autoCreateCustomersProducts: loadedAutoCreateCustomersProducts,
+        productCostingMethod: loadedProductCostingMethod,
+        productDefaultPriceTier: loadedProductDefaultPriceTier,
+        productDefaultPrice: loadedProductDefaultPrice,
+        productCurrency: loadedProductCurrency
       });
     } catch (error) {
       console.error('Failed to load settings:', error);
@@ -235,7 +282,8 @@ const Cin7Settings = () => {
 
     setSaving(true);
     try {
-      await axios.put(`/credentials/clients/${selectedClientId}/settings`, {
+      // Save credentials settings
+      const payload = {
         default_status: defaultStatus,
         sale_type: saleType,
         tax_rule: taxRule,
@@ -243,20 +291,43 @@ const Cin7Settings = () => {
         customer_account_receivable: customerAccountReceivable || null,
         customer_revenue_account: customerRevenueAccount || null,
         customer_tax_rule: customerTaxRule || null,
-        customer_attribute_set: customerAttributeSet || null
-      });
+        customer_attribute_set: customerAttributeSet || null,
+        product_costing_method: productCostingMethod || null,
+        product_default_price_tier: productDefaultPriceTier || null,
+        product_default_price: productDefaultPrice !== undefined ? productDefaultPrice : null,
+        product_currency: productCurrency || null,
+        auto_create_customers_products: autoCreateCustomersProducts
+      };
+      console.log('Saving settings with payload:', payload);
+      const response = await axios.put(`/credentials/clients/${selectedClientId}/settings`, payload);
+      console.log('Save response:', response.data);
+      
       toast.success('Settings saved successfully');
+      
+      // Update state from response to ensure we have the exact saved values
+      if (response.data.auto_create_customers_products !== undefined) {
+        const savedAutoCreate = response.data.auto_create_customers_products === true || response.data.auto_create_customers_products === 'true' || response.data.auto_create_customers_products === 1;
+        console.log('Updating auto_create_customers_products from response:', response.data.auto_create_customers_products, '->', savedAutoCreate);
+        setAutoCreateCustomersProducts(savedAutoCreate);
+      }
       
       // Update original values after successful save (convert undefined to empty string for comparison)
       setOriginalValues({
-        defaultStatus,
-        saleType,
-        taxRule,
-        defaultLocation: defaultLocation || '',
-        customerAccountReceivable: customerAccountReceivable || '',
-        customerRevenueAccount: customerRevenueAccount || '',
-        customerTaxRule: customerTaxRule || '',
-        customerAttributeSet: customerAttributeSet || ''
+        defaultStatus: response.data.default_status || defaultStatus,
+        saleType: response.data.sale_type || saleType,
+        taxRule: response.data.tax_rule || taxRule,
+        defaultLocation: (response.data.default_location || ''),
+        customerAccountReceivable: (response.data.customer_account_receivable || ''),
+        customerRevenueAccount: (response.data.customer_revenue_account || ''),
+        customerTaxRule: (response.data.customer_tax_rule || ''),
+        customerAttributeSet: (response.data.customer_attribute_set || ''),
+        autoCreateCustomersProducts: response.data.auto_create_customers_products !== undefined 
+          ? (response.data.auto_create_customers_products === true || response.data.auto_create_customers_products === 'true' || response.data.auto_create_customers_products === 1)
+          : autoCreateCustomersProducts,
+        productCostingMethod: response.data.product_costing_method || productCostingMethod,
+        productDefaultPriceTier: response.data.product_default_price_tier || productDefaultPriceTier,
+        productDefaultPrice: response.data.product_default_price !== undefined ? response.data.product_default_price : productDefaultPrice,
+        productCurrency: response.data.product_currency || productCurrency
       });
     } catch (error) {
       console.error('Error saving settings:', error);
@@ -267,6 +338,20 @@ const Cin7Settings = () => {
     }
   };
 
+  // Check if customer defaults are set up (required for auto-create)
+  const isCustomerDefaultsSetUp = useMemo(() => {
+    return !!(
+      customerAccountReceivable &&
+      customerRevenueAccount &&
+      customerTaxRule
+    );
+  }, [customerAccountReceivable, customerRevenueAccount, customerTaxRule]);
+
+  // Check if auto-create is ready (toggle ON and both customer and product defaults configured)
+  const isAutoCreateReady = useMemo(() => {
+    return autoCreateCustomersProducts && isCustomerDefaultsSetUp && !!productCostingMethod;
+  }, [autoCreateCustomersProducts, isCustomerDefaultsSetUp, productCostingMethod]);
+
   // Check if there are any changes (convert undefined to empty string for comparison)
   const hasChanges = 
     defaultStatus !== originalValues.defaultStatus ||
@@ -276,7 +361,12 @@ const Cin7Settings = () => {
     (customerAccountReceivable || '') !== originalValues.customerAccountReceivable ||
     (customerRevenueAccount || '') !== originalValues.customerRevenueAccount ||
     (customerTaxRule || '') !== originalValues.customerTaxRule ||
-    (customerAttributeSet || '') !== originalValues.customerAttributeSet;
+    (customerAttributeSet || '') !== originalValues.customerAttributeSet ||
+    autoCreateCustomersProducts !== originalValues.autoCreateCustomersProducts ||
+    productCostingMethod !== originalValues.productCostingMethod ||
+    productDefaultPriceTier !== originalValues.productDefaultPriceTier ||
+    productDefaultPrice !== originalValues.productDefaultPrice ||
+    productCurrency !== originalValues.productCurrency;
 
   if (!selectedClientId) {
     return (
@@ -301,6 +391,20 @@ const Cin7Settings = () => {
               Configure order defaults for {selectedClient?.name}
             </p>
           </div>
+          <Button
+            onClick={handleSave}
+            disabled={saving || !hasChanges}
+            className="h-8 text-xs"
+          >
+            {saving ? (
+              <>
+                <Loader2 className="w-3 h-3 mr-2 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              'Save All Settings'
+            )}
+          </Button>
         </div>
 
         {loading ? (
@@ -396,132 +500,233 @@ const Cin7Settings = () => {
 
           <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Customer Defaults</CardTitle>
-            <CardDescription className="text-xs">
-              Default values used when creating new customers
+            <div className="flex items-center gap-3">
+              <CardTitle className="text-sm">Auto-create Data Settings</CardTitle>
+              <div className="flex items-center gap-2">
+                {!autoCreateCustomersProducts ? (
+                  <Badge variant="outline" className="text-xs bg-gray-50 text-gray-600 border-gray-200">
+                    Inactive
+                  </Badge>
+                ) : isAutoCreateReady ? (
+                  <Badge variant="outline" className="text-xs bg-green-50 text-green-700 border-green-200">
+                    <CheckCircle2 className="h-3 w-3 mr-1" />
+                    Active
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="text-xs bg-red-50 text-red-700 border-red-200">
+                    <XCircle className="h-3 w-3 mr-1" />
+                    Not ready
+                  </Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="auto-create-customers-products" className="text-xs">Auto-create</Label>
+                <Switch
+                  id="auto-create-customers-products"
+                  checked={autoCreateCustomersProducts}
+                  onCheckedChange={setAutoCreateCustomersProducts}
+                />
+              </div>
+            </div>
+            <CardDescription className="text-xs mt-1">
+              Default values used when auto-creating customers and products
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4 max-w-xs">
-              <div>
-                <Label htmlFor="customer-account-receivable" className="text-xs">Account Receivable</Label>
-                {loadingAccounts ? (
-                  <div className="flex items-center gap-2 h-8">
-                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Loading accounts...</span>
+            {autoCreateCustomersProducts ? (
+              <div className="space-y-6 max-w-xs">
+                {(!isCustomerDefaultsSetUp || !productCostingMethod) && (
+                  <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                    <p className="text-xs text-yellow-800 font-medium mb-1">Setup Required</p>
+                    <p className="text-xs text-yellow-700">
+                      {!isCustomerDefaultsSetUp && 'Please configure Account Receivable, Revenue Account, and Tax Rule. '}
+                      {!productCostingMethod && 'Please configure Product Costing Method. '}
+                      All required defaults must be set to enable auto-create.
+                    </p>
                   </div>
-                ) : (
-                  <Select value={customerAccountReceivable} onValueChange={(value) => setCustomerAccountReceivable(value)}>
-                    <SelectTrigger id="customer-account-receivable" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
-                      <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts.map((account) => (
-                        <SelectItem key={account.Code || account.Name} value={account.Code || account.Name}>
-                          {account.Name} {account.Code ? `(${account.Code})` : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
                 )}
-                <p className="text-xs text-muted-foreground mt-1">
-                  Default Account Receivable for new customers (optional)
-                </p>
-              </div>
+                
+                {/* Customer Defaults Section */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-semibold text-gray-700">Customer Defaults</h4>
+                  <div>
+                    <Label htmlFor="customer-account-receivable" className="text-xs">Account Receivable</Label>
+                    {loadingAccounts ? (
+                      <div className="flex items-center gap-2 h-8">
+                        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">Loading accounts...</span>
+                      </div>
+                    ) : (
+                      <Select value={customerAccountReceivable} onValueChange={(value) => setCustomerAccountReceivable(value)}>
+                        <SelectTrigger id="customer-account-receivable" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                          <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {accounts.map((account) => (
+                            <SelectItem key={account.Code || account.Name} value={account.Code || account.Name}>
+                              {account.Name} {account.Code ? `(${account.Code})` : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default Account Receivable for new customers <span className="text-red-500">*</span>
+                    </p>
+                  </div>
 
-              <div>
-                <Label htmlFor="customer-revenue-account" className="text-xs">Revenue Account</Label>
-                {loadingAccounts ? (
-                  <div className="flex items-center gap-2 h-8">
-                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Loading accounts...</span>
+                  <div>
+                    <Label htmlFor="customer-revenue-account" className="text-xs">Revenue Account</Label>
+                    {loadingAccounts ? (
+                      <div className="flex items-center gap-2 h-8">
+                        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">Loading accounts...</span>
+                      </div>
+                    ) : (
+                      <Select value={customerRevenueAccount} onValueChange={(value) => setCustomerRevenueAccount(value)}>
+                        <SelectTrigger id="customer-revenue-account" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                          <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {accounts.map((account) => (
+                            <SelectItem key={account.Code || account.Name} value={account.Code || account.Name}>
+                              {account.Name} {account.Code ? `(${account.Code})` : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default Revenue Account for new customers <span className="text-red-500">*</span>
+                    </p>
                   </div>
-                ) : (
-                  <Select value={customerRevenueAccount} onValueChange={(value) => setCustomerRevenueAccount(value)}>
-                    <SelectTrigger id="customer-revenue-account" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
-                      <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accounts.map((account) => (
-                        <SelectItem key={account.Code || account.Name} value={account.Code || account.Name}>
-                          {account.Name} {account.Code ? `(${account.Code})` : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                <p className="text-xs text-muted-foreground mt-1">
-                  Default Revenue Account for new customers (optional)
-                </p>
-              </div>
 
-              <div>
-                <Label htmlFor="customer-tax-rule" className="text-xs">Tax Rule</Label>
-                {loadingTaxRules ? (
-                  <div className="flex items-center gap-2 h-8">
-                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Loading tax rules...</span>
+                  <div>
+                    <Label htmlFor="customer-tax-rule" className="text-xs">Tax Rule</Label>
+                    {loadingTaxRules ? (
+                      <div className="flex items-center gap-2 h-8">
+                        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">Loading tax rules...</span>
+                      </div>
+                    ) : (
+                      <Select value={customerTaxRule} onValueChange={(value) => setCustomerTaxRule(value)}>
+                        <SelectTrigger id="customer-tax-rule" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                          <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {taxRules.map((tax) => (
+                            <SelectItem key={tax.ID} value={tax.ID}>
+                              {tax.Name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default Tax Rule for new customers <span className="text-red-500">*</span>
+                    </p>
                   </div>
-                ) : (
-                  <Select value={customerTaxRule} onValueChange={(value) => setCustomerTaxRule(value)}>
-                    <SelectTrigger id="customer-tax-rule" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
-                      <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {taxRules.map((tax) => (
-                        <SelectItem key={tax.ID} value={tax.ID}>
-                          {tax.Name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                <p className="text-xs text-muted-foreground mt-1">
-                  Default Tax Rule for new customers (optional)
-                </p>
-              </div>
 
-              <div>
-                <Label htmlFor="customer-attribute-set" className="text-xs">Attribute Set</Label>
-                {loadingAttributeSets ? (
-                  <div className="flex items-center gap-2 h-8">
-                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">Loading attribute sets...</span>
+                  <div>
+                    <Label htmlFor="customer-attribute-set" className="text-xs">Attribute Set</Label>
+                    {loadingAttributeSets ? (
+                      <div className="flex items-center gap-2 h-8">
+                        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">Loading attribute sets...</span>
+                      </div>
+                    ) : (
+                      <Select value={customerAttributeSet} onValueChange={(value) => setCustomerAttributeSet(value)}>
+                        <SelectTrigger id="customer-attribute-set" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                          <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {attributeSets.map((attrSet) => (
+                            <SelectItem key={attrSet.ID || attrSet.Name} value={attrSet.Name || attrSet.ID}>
+                              {attrSet.Name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default Attribute Set for new customers (optional)
+                    </p>
                   </div>
-                ) : (
-                  <Select value={customerAttributeSet} onValueChange={(value) => setCustomerAttributeSet(value)}>
-                    <SelectTrigger id="customer-attribute-set" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
-                      <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {attributeSets.map((attrSet) => (
-                        <SelectItem key={attrSet.ID || attrSet.Name} value={attrSet.Name || attrSet.ID}>
-                          {attrSet.Name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                <p className="text-xs text-muted-foreground mt-1">
-                  Default Attribute Set for new customers (optional)
-                </p>
+                </div>
+                
+                {/* Product Defaults Section */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-semibold text-gray-700">Product Defaults</h4>
+                  <div>
+                    <Label htmlFor="product-costing-method" className="text-xs">
+                      Costing Method <span className="text-red-500">*</span>
+                    </Label>
+                    <Select value={productCostingMethod} onValueChange={setProductCostingMethod}>
+                      <SelectTrigger id="product-costing-method" className="h-8 text-xs w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="FIFO">FIFO</SelectItem>
+                        <SelectItem value="LIFO">LIFO</SelectItem>
+                        <SelectItem value="Average">Average</SelectItem>
+                        <SelectItem value="Standard">Standard</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default costing method for new products
+                    </p>
+                  </div>
+                  
+                  <div>
+                    <Label htmlFor="product-price-tier" className="text-xs">Default Price Tier</Label>
+                    <Input
+                      id="product-price-tier"
+                      className="h-8 text-xs w-full"
+                      value={productDefaultPriceTier}
+                      onChange={(e) => setProductDefaultPriceTier(e.target.value)}
+                      placeholder="Tier 1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default price tier name (e.g., "Tier 1")
+                    </p>
+                  </div>
+                  
+                  <div>
+                    <Label htmlFor="product-default-price" className="text-xs">Default Price</Label>
+                    <Input
+                      id="product-default-price"
+                      type="number"
+                      step="0.01"
+                      className="h-8 text-xs w-full"
+                      value={productDefaultPrice}
+                      onChange={(e) => setProductDefaultPrice(parseFloat(e.target.value) || 0.0)}
+                      placeholder="0.00"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Default price for new products
+                    </p>
+                  </div>
+                  
+                  <div>
+                    <Label htmlFor="product-currency" className="text-xs">Currency</Label>
+                    <Input
+                      id="product-currency"
+                      className="h-8 text-xs w-full"
+                      value={productCurrency}
+                      onChange={(e) => setProductCurrency(e.target.value)}
+                      placeholder="USD"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Currency for new products
+                    </p>
+                  </div>
+                </div>
               </div>
-              
-              <Button
-                onClick={handleSave}
-                disabled={saving || !hasChanges}
-                className="h-8 text-xs"
-              >
-                {saving ? (
-                  <>
-                    <Loader2 className="w-3 h-3 mr-2 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  'Save Settings'
-                )}
-              </Button>
-            </div>
+            ) : (
+              <div className="text-center py-8 text-sm text-muted-foreground">
+                Enable auto-create to configure default settings
+              </div>
+            )}
           </CardContent>
         </Card>
         </>

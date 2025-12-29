@@ -57,3 +57,5 @@ def downgrade():
     op.drop_column('client_erp_credentials', 'default_location', schema='voyager')
 
 
+
+

@@ -97,11 +97,43 @@ class SalesOrderValidator:
                         if customer_match_result[0]:  # Found a match above threshold
                             customer = customer_match_result[0]
                         else:
-                            # No fuzzy match found - will need to create customer
-                            needs_customer_creation = True
+                            # No fuzzy match found in preloaded data - fall back to API search
+                            # (customer might exist in Cin7 but not be in cache)
+                            try:
+                                api_customers = self.api_client.search_customer(name=customer_name)
+                                if api_customers and len(api_customers) > 0:
+                                    # Use fuzzy matching on API results
+                                    customer_match_result = fuzzy_match_customer(customer_name, api_customers, threshold=0.85)
+                                    if customer_match_result[0]:
+                                        customer = customer_match_result[0]
+                                    elif len(api_customers) == 1:
+                                        # Single result, use it even if below threshold
+                                        customer = api_customers[0]
+                                    else:
+                                        # Multiple results but none match well - flag for creation
+                                        needs_customer_creation = True
+                                else:
+                                    # No customers found in API - will need to create
+                                    needs_customer_creation = True
+                            except Exception:
+                                # API search failed - flag for creation
+                                needs_customer_creation = True
                     else:
-                        # No customers loaded - will need to create
-                        needs_customer_creation = True
+                        # No customers loaded - fall back to API search
+                        try:
+                            api_customers = self.api_client.search_customer(name=customer_name)
+                            if api_customers and len(api_customers) > 0:
+                                customer_match_result = fuzzy_match_customer(customer_name, api_customers, threshold=0.85)
+                                if customer_match_result[0]:
+                                    customer = customer_match_result[0]
+                                elif len(api_customers) == 1:
+                                    customer = api_customers[0]
+                                else:
+                                    needs_customer_creation = True
+                            else:
+                                needs_customer_creation = True
+                        except Exception:
+                            needs_customer_creation = True
                 else:
                     # Found by AdditionalAttribute1 - create a match result for consistency
                     # (exact match, so score is 1.0)
@@ -371,14 +403,15 @@ class SalesOrderValidator:
                 }
                 return result
             else:
-                # Product not found in preloaded data - mark as not found (no API call)
-                result = (False, "Product not found", None)
+                # Product not found in preloaded data - fall back to API call
+                # (cache might be incomplete or entity might exist in Cin7 but not in cache)
+                is_valid, message, product_id = self.api_client.validate_product(sku)
                 self.product_cache[sku] = {
-                    'valid': False,
-                    'message': 'Product not found',
-                    'product_id': None
+                    'valid': is_valid,
+                    'message': message,
+                    'product_id': product_id
                 }
-                return result
+                return is_valid, message, product_id
         
         # Only fallback to API if NOT preloaded (to avoid individual API calls)
         is_valid, message, product_id = self.api_client.validate_product(sku)
@@ -838,9 +871,28 @@ class SalesOrderValidator:
                 ).all()
                 
                 if cached_customers:
-                    customers = [cached.customer_data for cached in cached_customers]
+                    customers = []
+                    for cached in cached_customers:
+                        customer_data = cached.customer_data
+                        # Ensure customer_data has 'ID' field set (use cin7_customer_id from cache)
+                        if isinstance(customer_data, str):
+                            import json
+                            customer_data = json.loads(customer_data)
+                        if 'ID' not in customer_data or not customer_data.get('ID'):
+                            customer_data['ID'] = str(cached.cin7_customer_id)
+                        customers.append(customer_data)
+                
                 if cached_products:
-                    products = [cached.product_data for cached in cached_products]
+                    products = []
+                    for cached in cached_products:
+                        product_data = cached.product_data
+                        # Ensure product_data has 'ID' field set (use cin7_product_id from cache)
+                        if isinstance(product_data, str):
+                            import json
+                            product_data = json.loads(product_data)
+                        if 'ID' not in product_data or not product_data.get('ID'):
+                            product_data['ID'] = str(cached.cin7_product_id)
+                        products.append(product_data)
             except Exception as e:
                 print(f"Error loading from database cache: {str(e)}, falling back to API")
         

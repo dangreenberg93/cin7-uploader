@@ -1650,6 +1650,58 @@ class Cin7SalesAPI:
                 )
             return (False, error_msg, None)
     
+    def create_product(self, product_data: Dict[str, Any]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Create a new product in Cin7.
+        
+        Args:
+            product_data: Dictionary containing product data (Name and SKU are required)
+        
+        Returns:
+            (success, message, product_data)
+        """
+        self._rate_limit()
+        url = f"{self.base_url}/product"
+        endpoint = "/product"
+        method = "POST"
+        start_time = time.time()
+        
+        try:
+            response = self.session.post(url, json=product_data, timeout=30)
+            return self._handle_response(response, endpoint, method, url,
+                                       dict(self.session.headers), product_data, start_time)
+        except requests.exceptions.Timeout:
+            duration_ms = int((time.time() - start_time) * 1000)
+            if self.logger_callback:
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=dict(self.session.headers),
+                    request_body=product_data,
+                    response_status=None,
+                    response_body=None,
+                    error_message="Request timeout",
+                    duration_ms=duration_ms
+                )
+            return (False, "Request timeout", None)
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(e)[:200]
+            if self.logger_callback:
+                self.logger_callback(
+                    endpoint=endpoint,
+                    method=method,
+                    request_url=url,
+                    request_headers=dict(self.session.headers),
+                    request_body=product_data,
+                    response_status=None,
+                    response_body=None,
+                    error_message=error_msg,
+                    duration_ms=duration_ms
+                )
+            return (False, error_msg, None)
+    
     def search_sales_by_po(self, po_number: str) -> Tuple[bool, str, List[Dict[str, Any]]]:
         """
         Search for sales by CustomerReference (PO number) using the saleList endpoint.

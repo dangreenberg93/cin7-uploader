@@ -213,7 +213,7 @@ const CsvMappingConfig = () => {
                 <TableCell className="font-medium text-xs">{mapping.mapping_name}</TableCell>
                     <TableCell>
                       {mapping.is_default ? (
-                        <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 shadow-none hover:bg-primary">Default</Badge>
+                        <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 shadow-none">Default</Badge>
                       ) : (
                         <Button
                           variant="ghost"

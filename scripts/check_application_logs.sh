@@ -28,3 +28,5 @@ echo ""
 echo "6. All recent application logs (excluding access logs):"
 gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=cin7-uploader AND NOT httpRequest:*" --limit 30 --format="table(timestamp,severity,textPayload)" --freshness=1d | head -50
 
+
+

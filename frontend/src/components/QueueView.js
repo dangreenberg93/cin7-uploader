@@ -12,9 +12,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { Checkbox } from './ui/checkbox';
 import { Input } from './ui/input';
-import { ChevronDown, ChevronRight, RefreshCw, CheckCircle2, XCircle, FileText, RotateCcw, Eye, Download, Code, AlertCircle, Circle, Check, ArrowUp, ArrowDown, Search, Upload, Loader2 } from 'lucide-react';
+import { Textarea } from './ui/textarea';
+import { ChevronDown, ChevronRight, RefreshCw, CheckCircle2, XCircle, FileText, RotateCcw, Eye, Download, Code, AlertCircle, Circle, Check, ArrowUp, ArrowDown, Search, Upload, Loader2, ExternalLink } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Label } from './ui/label';
+import { Switch } from './ui/switch';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { cn } from '../lib/utils';
@@ -51,6 +53,8 @@ const QueueView = () => {
   const [bulkReviewOrders, setBulkReviewOrders] = useState([]);
   const [bulkReviewIndex, setBulkReviewIndex] = useState(0);
   const [bulkReviewModalOpen, setBulkReviewModalOpen] = useState(false);
+  const [bulkReviewMode, setBulkReviewMode] = useState('all'); // 'all' or 'one-by-one'
+  const [bulkNotes, setBulkNotes] = useState('');
   
   // Failed Orders tab state
   const [failedOrders, setFailedOrders] = useState([]);
@@ -58,15 +62,15 @@ const QueueView = () => {
   const [isFailedOrdersInitialLoad, setIsFailedOrdersInitialLoad] = useState(true);
   const [selectedOrderIds, setSelectedOrderIds] = useState(new Set());
   const [errorTypeFilter, setErrorTypeFilter] = useState('');
-  const [expandedFailedOrders, setExpandedFailedOrders] = useState(new Set());
   
   // Completed Orders tab state
   const [completedOrders, setCompletedOrders] = useState([]);
   const [completedOrdersLoading, setCompletedOrdersLoading] = useState(true);
   const [isCompletedOrdersInitialLoad, setIsCompletedOrdersInitialLoad] = useState(true);
-  const [expandedCompletedOrders, setExpandedCompletedOrders] = useState(new Set());
   const [unreviewedCount, setUnreviewedCount] = useState(0);
   const [unreviewedFailedCount, setUnreviewedFailedCount] = useState(0);
+  const [orderDetailsDialogOpen, setOrderDetailsDialogOpen] = useState(false);
+  const [viewingOrderDetails, setViewingOrderDetails] = useState(null);
   
   // Global filter and sort state
   const [searchQuery, setSearchQuery] = useState('');
@@ -78,6 +82,7 @@ const QueueView = () => {
   // File upload state
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
+  const completedOrdersScrollRef = useRef(null);
 
   // Filter and sort uploads
   const filteredAndSortedUploads = useMemo(() => {
@@ -557,6 +562,9 @@ const QueueView = () => {
         loadUnreviewedCount(),
         loadUnreviewedFailedCount()
       ]);
+      toast.success('Data refreshed successfully');
+    } catch (error) {
+      toast.error('Failed to refresh data');
     } finally {
       setIsRefreshing(false);
     }
@@ -572,8 +580,11 @@ const QueueView = () => {
       setActiveTab('failed');
       if (review === 'all') {
         setFailedFilterTab('all');
-      } else {
+      } else if (review === 'needs-review') {
         setFailedFilterTab('needs-review');
+      } else {
+        // No review param - default to 'all' if no unreviewed items, otherwise 'needs-review'
+        setFailedFilterTab(unreviewedFailedCount > 0 ? 'needs-review' : 'all');
       }
     } else if (tab === 'completed') {
       setActiveTab('completed');
@@ -583,7 +594,27 @@ const QueueView = () => {
     } else if (tab === 'uploads') {
       setActiveTab('uploads');
     }
-  }, [location.search]);
+  }, [location.search, unreviewedFailedCount]);
+
+  // Auto-switch to 'all' when switching to failed tab if no unreviewed items
+  useEffect(() => {
+    if (activeTab === 'failed' && unreviewedFailedCount === 0 && failedFilterTab === 'needs-review') {
+      setFailedFilterTab('all');
+    }
+  }, [activeTab, unreviewedFailedCount, failedFilterTab]);
+
+  // Clear selected orders when switching away from needs-review view
+  useEffect(() => {
+    if (activeTab === 'failed' && failedFilterTab !== 'needs-review') {
+      setSelectedOrderIds(new Set());
+    }
+  }, [activeTab, failedFilterTab]);
+
+  useEffect(() => {
+    if (activeTab === 'completed' && reviewFilterTab !== 'needs-review') {
+      setSelectedOrderIds(new Set());
+    }
+  }, [activeTab, reviewFilterTab]);
 
   // Use ref to track latest uploads
   const uploadsRef = useRef(uploads);
@@ -696,21 +727,30 @@ const QueueView = () => {
       case 'duplicate':
       default:
         // All non-processing statuses show as "Processed"
-        return <Badge variant="default" className="bg-gray-500 shadow-none hover:bg-gray-500 px-1.5 py-0 text-[10px] text-white">Processed</Badge>;
+        return <Badge variant="default" className="bg-gray-500 shadow-none px-1.5 py-0 text-[10px] text-white">Processed</Badge>;
     }
   };
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    // Format as local date and time
-    return date.toLocaleString(undefined, {
-      year: 'numeric',
+    // Backend sends UTC times in ISO format without 'Z' suffix
+    // We need to append 'Z' to tell JavaScript it's UTC, then it will convert to local time
+    let dateStr = dateString;
+    // If the string doesn't end with 'Z' and doesn't have a timezone offset (+/-), assume it's UTC
+    if (!dateStr.endsWith('Z') && !dateStr.match(/[+-]\d{2}:\d{2}$/)) {
+      dateStr = dateStr + 'Z';
+    }
+    const date = new Date(dateStr);
+    // Check if date is valid
+    if (isNaN(date.getTime())) return 'N/A';
+    // Format as compact local date and time (e.g., "12/29/25, 9:14 PM")
+    // toLocaleString automatically converts UTC to local timezone
+    return date.toLocaleString('en-US', {
       month: '2-digit',
       day: '2-digit',
-      hour: '2-digit',
+      year: '2-digit',
+      hour: 'numeric',
       minute: '2-digit',
-      second: '2-digit',
       hour12: true
     });
   };
@@ -828,64 +868,200 @@ const QueueView = () => {
       return;
     }
     
-    // Start bulk review process
+    // Start bulk review process - default to 'all' mode
     setBulkReviewOrders(ordersToReview);
     setBulkReviewIndex(0);
+    setBulkReviewMode('all');
     setReviewNotes('');
     setReviewNotesPreset('');
+    setBulkNotes('');
+    setBulkReviewModalOpen(true);
+  };
+
+  const bulkReviewCompletedOrders = async () => {
+    if (selectedOrderIds.size === 0) {
+      toast.error('Please select at least one order');
+      return;
+    }
+    
+    // Get selected orders that aren't already reviewed
+    const ordersToReview = completedOrders.filter(o => 
+      selectedOrderIds.has(o.id) && !o.reviewed
+    );
+    
+    if (ordersToReview.length === 0) {
+      toast.error('No unreviewed orders selected');
+      return;
+    }
+    
+    // Start bulk review process - default to 'all' mode
+    setBulkReviewOrders(ordersToReview);
+    setBulkReviewIndex(0);
+    setBulkReviewMode('all');
+    setReviewNotes('');
+    setReviewNotesPreset('');
+    setBulkNotes('');
     setBulkReviewModalOpen(true);
   };
 
   const submitBulkReview = async () => {
-    if (!reviewNotes.trim()) {
-      toast.error('Please enter review notes');
-      return;
-    }
-
-    const currentOrder = bulkReviewOrders[bulkReviewIndex];
+    // Determine if we're reviewing failed or completed orders
+    const isFailedOrders = bulkReviewOrders.length > 0 && 'resolved_at' in bulkReviewOrders[0];
     
-    try {
-      await axios.post(`/webhooks/orders/${currentOrder.id}/resolve`, { 
-        review_notes: reviewNotes 
-      });
-      
-      // Move to next order or finish
-      if (bulkReviewIndex < bulkReviewOrders.length - 1) {
-        setBulkReviewIndex(prev => prev + 1);
-        setReviewNotes('');
-        setReviewNotesPreset('');
-      } else {
-        // All orders reviewed
-        const resolvedTime = new Date().toISOString();
-        setFailedOrders(prevOrders => 
-          prevOrders.map(order => 
-            selectedOrderIds.has(order.id) && !order.resolved_at
-              ? { ...order, resolved_at: resolvedTime, review_notes: reviewNotes }
-              : order
-          )
-        );
-        
-        const reviewedCount = bulkReviewOrders.length;
-        setUnreviewedFailedCount(prev => {
-          const newCount = Math.max(0, prev - reviewedCount);
-          if (newCount === 0 && failedFilterTab === 'needs-review') {
-            setFailedFilterTab('all');
-          }
-          return newCount;
-        });
-        
-        setSelectedOrderIds(new Set());
-        setBulkReviewModalOpen(false);
-        setReviewNotes('');
-        setReviewNotesPreset('');
-        toast.success(`${bulkReviewOrders.length} order(s) marked as reviewed`);
-        window.dispatchEvent(new CustomEvent('refreshSidebarCounts'));
+    if (bulkReviewMode === 'all') {
+      // Add notes to all orders at once
+      if (!bulkNotes.trim()) {
+        toast.error('Please enter notes');
+        return;
       }
-    } catch (error) {
-      console.error('Failed to review order:', error);
-      toast.error(error.response?.data?.error || 'Failed to review order');
+
+      const selectedOrderArray = Array.from(selectedOrderIds);
+      let successCount = 0;
+      let errorCount = 0;
+
+      try {
+        // Review all selected orders in parallel (with notes)
+        const promises = selectedOrderArray.map(async (orderId) => {
+          try {
+            if (isFailedOrders) {
+              await axios.post(`/webhooks/orders/${orderId}/resolve`, { 
+                review_notes: bulkNotes 
+              });
+            } else {
+              await axios.post(`/webhooks/orders/${orderId}/review`, { 
+                reviewed: true,
+                review_notes: bulkNotes 
+              });
+            }
+            return { success: true, orderId };
+          } catch (error) {
+            console.error(`Failed to review order ${orderId}:`, error);
+            return { success: false, orderId, error: error.response?.data?.error || 'Failed to review order' };
+          }
+        });
+
+        const results = await Promise.all(promises);
+        
+        results.forEach(result => {
+          if (result.success) {
+            successCount++;
+          } else {
+            errorCount++;
+          }
+        });
+
+        // Show results
+        if (errorCount === 0) {
+          toast.success(`${successCount} order(s) marked as reviewed`);
+        } else {
+          toast.warning(`${successCount} order(s) reviewed, ${errorCount} failed`);
+        }
+
+        setBulkReviewModalOpen(false);
+        setBulkNotes('');
+        setReviewNotes('');
+        setReviewNotesPreset('');
+        setSelectedOrderIds(new Set());
+        
+        // Refresh the appropriate table
+        if (isFailedOrders) {
+          await loadFailedOrders(true);
+          // Update unreviewed count
+          const reviewedCount = successCount;
+          setUnreviewedFailedCount(prev => {
+            const newCount = Math.max(0, prev - reviewedCount);
+            if (newCount === 0 && failedFilterTab === 'needs-review') {
+              setFailedFilterTab('all');
+            }
+            return newCount;
+          });
+        } else {
+          await loadCompletedOrders(true);
+          // Update unreviewed count
+          const reviewedCount = successCount;
+          setUnreviewedCount(prev => {
+            const newCount = Math.max(0, prev - reviewedCount);
+            if (newCount === 0 && reviewFilterTab === 'needs-review') {
+              setReviewFilterTab('all');
+            }
+            return newCount;
+          });
+        }
+        
+        // Notify sidebar to refresh counts
+        window.dispatchEvent(new CustomEvent('refreshSidebarCounts'));
+      } catch (error) {
+        console.error('Failed to add bulk notes:', error);
+        toast.error('Failed to add notes to some orders');
+      }
+    } else {
+      // One-by-one mode (existing flow)
+      if (!reviewNotes.trim()) {
+        toast.error('Please enter review notes');
+        return;
+      }
+
+      const currentOrder = bulkReviewOrders[bulkReviewIndex];
+      
+      try {
+        if (isFailedOrders) {
+          await axios.post(`/webhooks/orders/${currentOrder.id}/resolve`, { 
+            review_notes: reviewNotes 
+          });
+        } else {
+          await axios.post(`/webhooks/orders/${currentOrder.id}/review`, { 
+            reviewed: true,
+            review_notes: reviewNotes 
+          });
+        }
+        
+        // Move to next order or finish
+        if (bulkReviewIndex < bulkReviewOrders.length - 1) {
+          setBulkReviewIndex(prev => prev + 1);
+          setReviewNotes('');
+          setReviewNotesPreset('');
+        } else {
+          // All orders reviewed
+          setSelectedOrderIds(new Set());
+          setBulkReviewModalOpen(false);
+          setReviewNotes('');
+          setReviewNotesPreset('');
+          toast.success(`${bulkReviewOrders.length} order(s) marked as reviewed`);
+          
+          // Refresh the appropriate table
+          if (isFailedOrders) {
+            await loadFailedOrders(true);
+            // Update unreviewed count
+            const reviewedCount = bulkReviewOrders.length;
+            setUnreviewedFailedCount(prev => {
+              const newCount = Math.max(0, prev - reviewedCount);
+              if (newCount === 0 && failedFilterTab === 'needs-review') {
+                setFailedFilterTab('all');
+              }
+              return newCount;
+            });
+          } else {
+            await loadCompletedOrders(true);
+            // Update unreviewed count
+            const reviewedCount = bulkReviewOrders.length;
+            setUnreviewedCount(prev => {
+              const newCount = Math.max(0, prev - reviewedCount);
+              if (newCount === 0 && reviewFilterTab === 'needs-review') {
+                setReviewFilterTab('all');
+              }
+              return newCount;
+            });
+          }
+          
+          window.dispatchEvent(new CustomEvent('refreshSidebarCounts'));
+        }
+      } catch (error) {
+        console.error('Failed to review order:', error);
+        toast.error(error.response?.data?.error || 'Failed to review order');
+      }
     }
   };
+
 
   const toggleSelectOrder = (orderId, checked) => {
     const newSelected = new Set(selectedOrderIds);
@@ -907,15 +1083,6 @@ const QueueView = () => {
     }
   };
 
-  const toggleExpandFailedOrder = (orderId) => {
-    const newExpanded = new Set(expandedFailedOrders);
-    if (newExpanded.has(orderId)) {
-      newExpanded.delete(orderId);
-    } else {
-      newExpanded.add(orderId);
-    }
-    setExpandedFailedOrders(newExpanded);
-  };
 
   const handleFileUpload = async (file) => {
     if (!selectedClientId) {
@@ -953,6 +1120,11 @@ const QueueView = () => {
       } else {
         toast.success(`File uploaded successfully! Processing ${file.name}...`);
         addTerminalLine('success', `File uploaded: ${file.name}. Processing in background...`);
+        
+        // Navigate to the uploads tab to show all uploads
+        const params = new URLSearchParams(location.search);
+        params.set('tab', 'uploads');
+        navigate(`/?${params.toString()}`, { replace: false });
         
         // Refresh the queue after a short delay to show the new upload
         setTimeout(() => {
@@ -1000,8 +1172,9 @@ const QueueView = () => {
     const typeLabels = {
       'customer_not_found': 'Customer Not Found',
       'missing_fields': 'Missing Fields',
+      'data_missing': 'Data Missing',
       'api_error': 'API Error',
-      'validation_error': 'Validation Error',
+      'validation_error': 'Data Missing',
       'duplicate_po': 'Duplicate PO',
       'partial_success': 'Partial Success'
     };
@@ -1009,14 +1182,15 @@ const QueueView = () => {
     const typeColors = {
       'customer_not_found': 'bg-red-500',
       'missing_fields': 'bg-orange-500',
+      'data_missing': 'bg-red-500',
       'api_error': 'bg-purple-500',
-      'validation_error': 'bg-yellow-500',
+      'validation_error': 'bg-red-500',
       'duplicate_po': 'bg-blue-500',
       'partial_success': 'bg-orange-500'
     };
     
     return (
-      <Badge className={cn(typeColors[errorType] || 'bg-gray-500', 'text-white text-[10px] px-1.5 py-0 h-4 font-semibold shadow-none hover:opacity-100')}>
+      <Badge className={cn(typeColors[errorType] || 'bg-gray-500', 'text-white text-[10px] px-1.5 py-0 h-4 font-semibold shadow-none')}>
         {typeLabels[errorType] || errorType}
       </Badge>
     );
@@ -1137,7 +1311,7 @@ const QueueView = () => {
                               {isMatched && productId && (
                                 <Tooltip>
                                   <TooltipTrigger asChild>
-                                    <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help h-4 w-4">
+                                    <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 cursor-help h-4 w-4">
                                       <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
                                     </span>
                                   </TooltipTrigger>
@@ -1147,8 +1321,8 @@ const QueueView = () => {
                                 </Tooltip>
                               )}
                               {isUnmatched && (
-                                <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">
-                                  SKU Missing in Cin7
+                                <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold font-sans shadow-none">
+                                  Not found in Cin7
                                 </Badge>
                               )}
                             </div>
@@ -1372,12 +1546,13 @@ const QueueView = () => {
           {showOrderHeader && Object.keys(payload).filter(k => k !== 'Lines').length > 0 && (
             <div>
               <div className="text-xs font-semibold text-gray-700 mb-1">{title}</div>
-              <div className="border-[0.5px] rounded-md overflow-hidden bg-white">
-                <Table>
-                  <TableBody>
-                    {Object.entries(payload)
-                      .filter(([key]) => key !== 'Lines' && key !== 'CustomerID' && key !== 'Type')
-                      .map(([key, value]) => {
+              <div className="border border-input rounded-md overflow-hidden bg-white shadow-none">
+                <div className="overflow-x-auto">
+                  <Table className="border-0 border-separate border-spacing-0 shadow-none">
+                    <TableBody>
+                      {Object.entries(payload)
+                        .filter(([key]) => key !== 'Lines' && key !== 'CustomerID' && key !== 'Type')
+                        .map(([key, value]) => {
                         const isPlaceholder = typeof value === 'string' && (value.includes('<REQUIRED:') || value.includes('<SALE_ID_PLACEHOLDER>'));
                         const isEmpty = value === null || value === undefined || value === '';
                         const isMissing = isPlaceholder || isEmpty;
@@ -1389,17 +1564,18 @@ const QueueView = () => {
                         // Check if customer was matched - get ID from payload first, then matching details
                         const customerId = (payload.CustomerID && String(payload.CustomerID)) || (matchingDetails?.customer?.cin7_id && String(matchingDetails.customer.cin7_id)) || null;
                         const customerMatched = isCustomerField && customerWasFound && customerId;
+                        const customerWasAutoCreated = isCustomerField && matchingDetails?.customer?.auto_created === true;
                         
                         return (
                           <TableRow key={key} className={`bg-white ${isMissing ? 'bg-orange-50' : ''}`}>
                             <TableCell className="font-medium text-xs text-gray-700 bg-white">{key}</TableCell>
-                            <TableCell className={`text-xs bg-white ${customerNotMatched ? 'text-red-600' : isPlaceholder ? 'text-orange-600 font-medium italic' : isEmpty ? 'text-orange-600 italic' : 'text-gray-900'}`}>
+                            <TableCell className={`text-xs bg-white ${isPlaceholder ? 'text-orange-600 font-medium italic' : isEmpty ? 'text-orange-600 italic' : 'text-gray-900'}`}>
                               <div className="flex items-center gap-1.5">
                                 <span>{isPlaceholder ? value : (isEmpty ? <span className="italic">(missing)</span> : String(value))}</span>
-                                {customerMatched && (
+                                {customerMatched && !customerWasAutoCreated && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help h-4 w-4">
+                                      <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 cursor-help h-4 w-4">
                                         <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
                                       </span>
                                     </TooltipTrigger>
@@ -1408,8 +1584,11 @@ const QueueView = () => {
                                     </TooltipContent>
                                   </Tooltip>
                                 )}
+                                {customerWasAutoCreated && (
+                                  <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none">New</Badge>
+                                )}
                                 {customerNotMatched && (
-                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">Not found in Cin7</Badge>
+                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold font-sans shadow-none">Not found in Cin7</Badge>
                                 )}
                               </div>
                             </TableCell>
@@ -1417,7 +1596,8 @@ const QueueView = () => {
                         );
                       })}
                   </TableBody>
-                </Table>
+                  </Table>
+                </div>
               </div>
             </div>
           )}
@@ -1426,15 +1606,15 @@ const QueueView = () => {
           <div>
             <div className="text-xs font-semibold text-gray-700 mb-1">{title}</div>
             {(payload.Lines.length > 0 || (orderContext?.removed_products && orderContext.removed_products.length > 0) || (matchingDetails?.products && matchingDetails.products.some(p => !p.found))) ? (
-              <div className="border-[1px] rounded-md overflow-hidden bg-white">
+              <div className="border border-input rounded-md overflow-hidden bg-white shadow-none">
                 <div className="overflow-x-auto">
-                  <Table>
+                  <Table className="border-0 border-separate border-spacing-0 shadow-none">
                     <TableHeader>
                       <TableRow className="bg-gray-50">
-                        <TableHead className="font-semibold text-xs">SKU</TableHead>
-                        <TableHead className="font-semibold text-xs text-right">Quantity</TableHead>
-                        <TableHead className="font-semibold text-xs text-right">Price</TableHead>
-                        <TableHead className="font-semibold text-xs text-right">Total</TableHead>
+                        <TableHead className="font-semibold text-xs h-8 py-1">SKU</TableHead>
+                        <TableHead className="font-semibold text-xs text-right h-8 py-1">Quantity</TableHead>
+                        <TableHead className="font-semibold text-xs text-right h-8 py-1">Price</TableHead>
+                        <TableHead className="font-semibold text-xs text-right h-8 py-1">Total</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1447,8 +1627,10 @@ const QueueView = () => {
                         // Find matching product details
                         const productMatch = matchingDetails?.products?.find(p => p.sku === line.SKU);
                         const isMatched = productMatch?.found && line.ProductID && !hasPlaceholder;
-                        const isUnmatched = productMatch && !productMatch.found; // Product was checked but not found
+                        // Product is unmatched if: marked with _not_found flag, or found in matching_details as not found
+                        const isUnmatched = line._not_found || (productMatch && !productMatch.found);
                         const productId = (line.ProductID && String(line.ProductID)) || (productMatch?.cin7_id && String(productMatch.cin7_id)) || null;
+                        const productWasAutoCreated = productMatch?.auto_created === true;
                         
                         // Get CSV values as fallback for quantity and price
                         const csvValues = getCsvValuesForLine(line.SKU);
@@ -1488,10 +1670,10 @@ const QueueView = () => {
                             <TableCell className={`text-xs ${textClassName}`}>
                               <div className="flex items-center gap-1.5">
                                 <span>{line.SKU || <span className="italic">(missing)</span>}</span>
-                                {isMatched && productId && (
+                                {isMatched && productId && !productWasAutoCreated && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help h-4 w-4">
+                                      <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 cursor-help h-4 w-4">
                                         <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
                                       </span>
                                     </TooltipTrigger>
@@ -1500,9 +1682,12 @@ const QueueView = () => {
                                     </TooltipContent>
                                   </Tooltip>
                                 )}
+                                {productWasAutoCreated && (
+                                  <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none">New</Badge>
+                                )}
                                 {isUnmatched && (
-                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">
-                                    SKU Missing in Cin7
+                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold font-sans shadow-none">
+                                    Not found in Cin7
                                   </Badge>
                                 )}
                               </div>
@@ -1516,11 +1701,11 @@ const QueueView = () => {
                       
                       {/* Show unmatched products from removed_products */}
                       {orderContext?.removed_products && orderContext.removed_products.map((removed, idx) => {
-                        const rowData = removed.row_data || {};
                         const sku = removed.sku;
-                        const quantity = rowData.Quantity || rowData.quantity || rowData.qty || '-';
-                        const price = rowData.Price || rowData.price || rowData.unit_price || '-';
-                        const total = (quantity !== '-' && price !== '-') 
+                        // Use quantity and price from removed_products object (added by backend)
+                        const quantity = removed.quantity !== null && removed.quantity !== undefined ? removed.quantity : '-';
+                        const price = removed.price !== null && removed.price !== undefined ? removed.price : '-';
+                        const total = (quantity !== '-' && price !== '-' && !isNaN(Number(quantity)) && !isNaN(Number(price))) 
                           ? formatCurrency(Number(quantity) * Number(price))
                           : '-';
                         
@@ -1529,12 +1714,12 @@ const QueueView = () => {
                             <TableCell className="text-xs text-gray-900">
                               <div className="flex items-center gap-1.5">
                                 <span>{sku}</span>
-                                <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">
-                                  No match found - not created in Cin7
+                                <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold font-sans shadow-none">
+                                  Not found in Cin7
                                 </Badge>
                               </div>
                             </TableCell>
-                            <TableCell className="text-right text-xs text-gray-900">{quantity}</TableCell>
+                            <TableCell className="text-right text-xs text-gray-900">{quantity !== '-' ? String(quantity) : '-'}</TableCell>
                             <TableCell className="text-right text-xs text-gray-900">{price !== '-' ? `$${Number(price).toFixed(2)}` : '-'}</TableCell>
                             <TableCell className="text-right text-xs text-gray-900">{total}</TableCell>
                           </TableRow>
@@ -1546,17 +1731,27 @@ const QueueView = () => {
                         .filter(p => !p.found && !payload.Lines.some(line => line.SKU === p.sku))
                         .filter(p => !orderContext?.removed_products?.some(removed => removed.sku === p.sku))
                         .map((unmatched, idx) => {
-                          // Try to get quantity and price from orderContext.all_rows using improved lookup
-                          const csvValues = getCsvValuesForLine(unmatched.sku);
-                          const quantity = (() => {
-                            const csvQty = parseNumericValue(csvValues?.quantity);
-                            return csvQty !== null ? csvQty : '-';
-                          })();
-                          const price = (() => {
-                            const csvPrice = parseNumericValue(csvValues?.price);
-                            return csvPrice !== null ? csvPrice : '-';
-                          })();
-                          const total = (quantity !== '-' && price !== '-') 
+                          // First try to use quantity and price from matching_details (added by backend)
+                          let quantity = unmatched.quantity !== null && unmatched.quantity !== undefined ? unmatched.quantity : null;
+                          let price = unmatched.price !== null && unmatched.price !== undefined ? unmatched.price : null;
+                          
+                          // Fallback to CSV values if not in matching_details
+                          if (quantity === null || price === null) {
+                            const csvValues = getCsvValuesForLine(unmatched.sku);
+                            if (quantity === null) {
+                              const csvQty = parseNumericValue(csvValues?.quantity);
+                              quantity = csvQty !== null ? csvQty : '-';
+                            }
+                            if (price === null) {
+                              const csvPrice = parseNumericValue(csvValues?.price);
+                              price = csvPrice !== null ? csvPrice : '-';
+                            }
+                          } else {
+                            quantity = quantity;
+                            price = price;
+                          }
+                          
+                          const total = (quantity !== '-' && price !== '-' && !isNaN(Number(quantity)) && !isNaN(Number(price))) 
                             ? formatCurrency(Number(quantity) * Number(price))
                             : '-';
                           
@@ -1565,8 +1760,8 @@ const QueueView = () => {
                               <TableCell className="text-xs text-gray-900">
                                 <div className="flex items-center gap-1.5">
                                   <span>{unmatched.sku}</span>
-                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">
-                                    SKU Missing in Cin7
+                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold font-sans shadow-none">
+                                    Not found in Cin7
                                   </Badge>
                                 </div>
                               </TableCell>
@@ -1612,21 +1807,22 @@ const QueueView = () => {
                   // Check if customer was matched - get ID from payload first, then matching details
                   const customerId = (payload.CustomerID && String(payload.CustomerID)) || (matchingDetails?.customer?.cin7_id && String(matchingDetails.customer.cin7_id)) || null;
                   const customerMatched = isCustomerField && customerWasFound && customerId;
+                  const customerWasAutoCreated = isCustomerField && matchingDetails?.customer?.auto_created === true;
                   
                   return (
                     <TableRow key={key} className={`bg-white ${isMissing ? 'bg-orange-50' : ''}`}>
                       <TableCell className="font-medium text-xs text-gray-700 bg-white">{key}</TableCell>
-                      <TableCell className={`text-xs bg-white ${customerNotMatched ? 'text-red-600' : isPlaceholder ? 'text-orange-600 font-medium italic' : isEmpty ? 'text-orange-600 italic' : 'text-gray-900'}`}>
+                      <TableCell className={`text-xs bg-white ${isPlaceholder ? 'text-orange-600 font-medium italic' : isEmpty ? 'text-orange-600 italic' : 'text-gray-900'}`}>
                         <div className="flex items-center gap-1.5">
                           <span>{isPlaceholder ? (
                             <span className="italic">{value}</span>
                           ) : (
                             <span>{isEmpty ? <span className="italic">(missing)</span> : String(value)}</span>
                           )}</span>
-                          {customerMatched && (
+                          {customerMatched && !customerWasAutoCreated && (
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 hover:bg-green-600 cursor-help h-4 w-4">
+                                <span className="inline-flex items-center justify-center rounded-full border border-transparent bg-green-500 cursor-help h-4 w-4">
                                   <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
                                 </span>
                               </TooltipTrigger>
@@ -1635,8 +1831,11 @@ const QueueView = () => {
                               </TooltipContent>
                             </Tooltip>
                           )}
+                          {customerWasAutoCreated && (
+                            <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 bg-blue-500 shadow-none">New</Badge>
+                          )}
                           {customerNotMatched && (
-                            <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold hover:bg-destructive font-sans">Not found in Cin7</Badge>
+                            <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 !font-semibold font-sans">Not found in Cin7</Badge>
                           )}
                         </div>
                       </TableCell>
@@ -1653,31 +1852,31 @@ const QueueView = () => {
   };
 
   return (
-    <div className="h-full w-full overflow-y-auto">
-      <div className="p-6 space-y-6">
-        <Tabs 
-          value={activeTab} 
-          onValueChange={(value) => {
-            setActiveTab(value);
-            // Update URL based on tab
-            const params = new URLSearchParams(location.search);
-            if (value === 'failed') {
-              params.set('tab', 'failed');
-              params.delete('review');
-            } else if (value === 'completed') {
-              params.set('tab', 'completed');
-              // Keep review param if it exists
-            } else if (value === 'uploads') {
-              params.set('tab', 'uploads');
-              params.delete('review');
-            }
-            navigate(`/?${params.toString()}`, { replace: true });
-          }} 
-          defaultValue="completed" 
-          className="w-full"
-        >
-          <div className="space-y-3 mb-4">
-            <div className="flex items-center justify-between">
+    <div className="flex flex-col h-full overflow-hidden">
+      <Tabs 
+        value={activeTab} 
+        onValueChange={(value) => {
+          setActiveTab(value);
+          // Update URL based on tab
+          const params = new URLSearchParams(location.search);
+          if (value === 'failed') {
+            params.set('tab', 'failed');
+            params.delete('review');
+          } else if (value === 'completed') {
+            params.set('tab', 'completed');
+            // Keep review param if it exists
+          } else if (value === 'uploads') {
+            params.set('tab', 'uploads');
+            params.delete('review');
+          }
+          navigate(`/?${params.toString()}`, { replace: true });
+        }} 
+        defaultValue="completed" 
+        className="flex flex-col h-full min-h-0"
+      >
+        <div className="p-6 pb-0 flex-shrink-0">
+          <div className="mb-4">
+            <div className="flex items-center gap-3 flex-wrap">
               <TabsList className="h-9 p-1">
                 <TabsTrigger value="completed" className="text-xs py-1.5 px-3">
                   Sync'd Orders
@@ -1687,61 +1886,6 @@ const QueueView = () => {
                 </TabsTrigger>
                 <TabsTrigger value="uploads" className="text-xs py-1.5 px-3">All Uploads</TabsTrigger>
               </TabsList>
-              <div className="flex items-center gap-2">
-                {/* File Upload */}
-                <div
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onClick={() => !isUploading && selectedClientId && fileInputRef.current?.click()}
-                  className={cn(
-                    "relative border-2 border-dashed rounded-md px-4 py-1.5 cursor-pointer transition-colors",
-                    "bg-transparent border-muted-foreground/30 hover:border-primary/50 hover:bg-primary/5",
-                    (isUploading || !selectedClientId) && "opacity-50 cursor-not-allowed",
-                    "min-w-[160px] flex items-center justify-center gap-2"
-                  )}
-                >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".csv"
-                    onChange={handleFileSelect}
-                    className="hidden"
-                    disabled={isUploading}
-                  />
-                  {isUploading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      <span className="text-xs">Uploading...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="h-4 w-4" />
-                      <span className="text-xs">Upload CSV</span>
-                    </>
-                  )}
-                </div>
-                <Button onClick={handleRefresh} variant="ghost" disabled={isRefreshing} className="h-8 px-3 text-xs">
-                  <RefreshCw className={cn("h-4 w-4 mr-2", isRefreshing && "animate-spin")} />
-                  Refresh
-                </Button>
-                {/* Bulk Actions */}
-                <div className="flex items-center gap-2" style={{ minHeight: '36px' }}>
-                {selectedOrderIds.size > 0 && (
-                  <>
-                    <Button onClick={bulkRetryOrders} variant="default" size="sm" className="h-7 text-xs px-2">
-                      <RotateCcw className="h-3 w-3 mr-1.5" />
-                      Retry ({selectedOrderIds.size})
-                    </Button>
-                    <Button onClick={bulkResolveOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
-                      Review ({selectedOrderIds.size})
-                    </Button>
-                  </>
-                )}
-                </div>
-              </div>
-            </div>
-            {/* Global Filters and Search */}
-            <div className="flex items-center gap-3">
               {activeTab === 'completed' && (
                 <Tabs 
                   value={reviewFilterTab} 
@@ -1767,7 +1911,7 @@ const QueueView = () => {
                     >
                       Needs Review
                       {unreviewedCount > 0 && (
-                        <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
+                        <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none">{unreviewedCount}</Badge>
                       )}
                     </TabsTrigger>
                     <TabsTrigger value="all" className="text-xs py-1.5 px-3">
@@ -1801,7 +1945,7 @@ const QueueView = () => {
                     >
                       Needs Review
                       {unreviewedFailedCount > 0 && (
-                        <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-red-500 shadow-none hover:bg-red-500">{unreviewedFailedCount}</Badge>
+                        <Badge variant="default" className="ml-1.5 text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-red-500 shadow-none">{unreviewedFailedCount}</Badge>
                       )}
                     </TabsTrigger>
                     <TabsTrigger value="all" className="text-xs py-1.5 px-3">
@@ -1819,23 +1963,86 @@ const QueueView = () => {
                   className="pl-8 h-9 text-xs"
                 />
               </div>
+              <div className="flex items-center gap-2 ml-auto">
+                {/* File Upload */}
+                <div
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onClick={() => !isUploading && selectedClientId && fileInputRef.current?.click()}
+                  className={cn(
+                    "relative border border-solid rounded-md px-4 h-9 cursor-pointer transition-colors",
+                    "bg-primary text-primary-foreground hover:bg-primary/90 font-semibold",
+                    (isUploading || !selectedClientId) && "opacity-50 cursor-not-allowed",
+                    "min-w-[160px] flex items-center justify-center gap-2"
+                  )}
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                    disabled={isUploading}
+                  />
+                  {isUploading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span className="text-xs">Uploading...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="h-4 w-4" />
+                      <span className="text-xs">Upload CSV</span>
+                    </>
+                  )}
+                </div>
+                <Button onClick={handleRefresh} variant="ghost" disabled={isRefreshing} className="h-9 px-3 text-xs">
+                  <RefreshCw className={cn("h-4 w-4 mr-2", isRefreshing && "animate-spin")} />
+                  Refresh
+                </Button>
+                {/* Bulk Actions */}
+                <div className="flex items-center gap-2" style={{ minHeight: '36px' }}>
+                {selectedOrderIds.size > 0 && (
+                  <>
+                    {activeTab === 'failed' && failedFilterTab === 'needs-review' && (
+                      <Button onClick={bulkRetryOrders} variant="default" size="sm" className="h-7 text-xs px-2">
+                        <RotateCcw className="h-3 w-3 mr-1.5" />
+                        Retry ({selectedOrderIds.size})
+                      </Button>
+                    )}
+                    {activeTab === 'failed' && (
+                      <Button onClick={bulkResolveOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
+                        Review ({selectedOrderIds.size})
+                      </Button>
+                    )}
+                    {activeTab === 'completed' && (
+                      <Button onClick={bulkReviewCompletedOrders} variant="outline" size="sm" className="h-7 text-xs px-2">
+                        Review ({selectedOrderIds.size})
+                      </Button>
+                    )}
+                  </>
+                )}
+                </div>
+              </div>
             </div>
           </div>
+        </div>
 
-          <TabsContent value="uploads">
+        <TabsContent value="uploads" className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
             {/* Uploads Table */}
-            <div className="overflow-x-auto">
+            <div className="flex-1 flex flex-col min-h-0 relative">
           {loading && isInitialLoad ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
           ) : filteredAndSortedUploads.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">No uploads found</div>
           ) : (
-            <div className="border-[1px] rounded-md overflow-hidden bg-white">
-              <Table className="border-0">
+            <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0 relative">
+              <div className="flex-1 overflow-auto">
+              <Table className="border-0 border-separate border-spacing-0">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Filename</TableHead>
-                  <TableHead>
+                  <TableHead className="text-xs font-semibold h-8 py-1">Filename</TableHead>
+                  <TableHead className="text-xs font-semibold h-8 py-1">
                     <button
                       onClick={() => {
                         if (dateSortDirection === null) {
@@ -1846,18 +2053,18 @@ const QueueView = () => {
                           setDateSortDirection(null);
                         }
                       }}
-                      className="flex items-center gap-1 hover:opacity-70 transition-opacity text-left"
+                      className="flex items-center gap-1 hover:opacity-70 transition-opacity text-left font-semibold"
                     >
                       Date
                       {dateSortDirection === 'asc' && <ArrowUp className="h-3 w-3" />}
                       {dateSortDirection === 'desc' && <ArrowDown className="h-3 w-3" />}
                     </button>
                   </TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Orders</TableHead>
-                  <TableHead className="text-right">Successful</TableHead>
-                  <TableHead className="text-right">Failed</TableHead>
-                  <TableHead>Actions</TableHead>
+                  <TableHead className="text-xs font-semibold h-8 py-1">Status</TableHead>
+                  <TableHead className="text-xs font-semibold text-right h-8 py-1">Orders</TableHead>
+                  <TableHead className="text-xs font-semibold text-right h-8 py-1">Successful</TableHead>
+                  <TableHead className="text-xs font-semibold text-right h-8 py-1">Failed</TableHead>
+                  <TableHead className="text-xs font-semibold h-8 py-1">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -2104,74 +2311,69 @@ const QueueView = () => {
                 })}
               </TableBody>
               </Table>
+              </div>
             </div>
           )}
-        </div>
+            </div>
           </TabsContent>
 
-          <TabsContent value="failed">
+          <TabsContent value="failed" className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
             {/* Failed Orders View */}
-            <div className="space-y-4">
+            <div className="flex-1 flex flex-col min-h-0 relative">
               {/* Failed Orders Table */}
-              <div className="overflow-x-auto">
-                {failedOrdersLoading && isFailedOrdersInitialLoad ? (
-                  <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                ) : filteredAndSortedFailedOrders.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">No failed orders found</div>
-                ) : (
-                  <div className="border-[1px] rounded-md overflow-hidden bg-white">
-                    <Table className="border-0">
+              {failedOrdersLoading && isFailedOrdersInitialLoad ? (
+                <div className="text-center py-8 text-muted-foreground">Loading...</div>
+              ) : filteredAndSortedFailedOrders.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No failed orders found</div>
+              ) : (
+                <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0 relative">
+                  <div className="flex-1 overflow-auto">
+                    <Table className="border-0 border-separate border-spacing-0">
                       <TableHeader>
                         <TableRow>
-                          <TableHead className="w-10">
-                          <Checkbox
-                            checked={selectedOrderIds.size === filteredAndSortedFailedOrders.length && filteredAndSortedFailedOrders.length > 0 && filteredAndSortedFailedOrders.every(o => selectedOrderIds.has(o.id))}
-                            onCheckedChange={(checked) => {
-                              if (checked) {
-                                setSelectedOrderIds(new Set(filteredAndSortedFailedOrders.map(o => o.id)));
-                              } else {
-                                setSelectedOrderIds(new Set());
-                              }
-                            }}
-                          />
-                        </TableHead>
-                        <TableHead className="w-10"></TableHead>
-                        <TableHead className="text-xs font-semibold text-center">Reviewed</TableHead>
-                        <TableHead className="text-xs font-semibold">Order</TableHead>
-                        <TableHead className="text-xs font-semibold">Customer</TableHead>
-                        <TableHead className="text-xs font-semibold">PO #</TableHead>
-                        <TableHead className="text-xs font-semibold">Notes</TableHead>
-                        <TableHead className="text-xs font-semibold">Error Type</TableHead>
-                        <TableHead className="text-xs font-semibold">Retry Count</TableHead>
-                        <TableHead className="text-xs font-semibold">Last Retry</TableHead>
-                        <TableHead className="text-xs font-semibold">Source Upload</TableHead>
-                        <TableHead className="text-xs font-semibold">Actions</TableHead>
+                          {failedFilterTab === 'needs-review' && (
+                            <TableHead className="w-10 h-8 py-1">
+                              <Checkbox
+                                checked={selectedOrderIds.size === filteredAndSortedFailedOrders.length && filteredAndSortedFailedOrders.length > 0 && filteredAndSortedFailedOrders.every(o => selectedOrderIds.has(o.id))}
+                                onCheckedChange={(checked) => {
+                                  if (checked) {
+                                    setSelectedOrderIds(new Set(filteredAndSortedFailedOrders.map(o => o.id)));
+                                  } else {
+                                    setSelectedOrderIds(new Set());
+                                  }
+                                }}
+                              />
+                            </TableHead>
+                          )}
+                        <TableHead className="text-xs font-semibold text-center h-8 py-1">Reviewed</TableHead>
+                        <TableHead className="text-xs font-semibold h-8 py-1">Order</TableHead>
+                        <TableHead className="text-xs font-semibold h-8 py-1">Customer</TableHead>
+                        <TableHead className="text-xs font-semibold h-8 py-1">PO #</TableHead>
+                        <TableHead className="text-xs font-semibold h-8 py-1">Notes</TableHead>
+                        <TableHead className="text-xs font-semibold h-8 py-1">Error Type</TableHead>
+                        {/* <TableHead className="text-xs font-semibold h-8 py-1">Retry Count</TableHead> */}
+                        {/* <TableHead className="text-xs font-semibold h-8 py-1">Last Retry</TableHead> */}
+                        <TableHead className="text-xs font-semibold h-8 py-1">Source Upload</TableHead>
+                        <TableHead className="text-xs font-semibold w-auto sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l text-center h-8 py-1" style={{ borderLeft: '1px solid hsl(var(--border))' }}>Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {filteredAndSortedFailedOrders.map((order) => {
-                        const isExpanded = expandedFailedOrders.has(order.id);
                         const isSelected = selectedOrderIds.has(order.id);
                         
                         return (
-                          <React.Fragment key={order.id}>
-                            <TableRow 
-                              className="cursor-pointer hover:bg-muted/50"
-                              onClick={() => toggleExpandFailedOrder(order.id)}
-                            >
-                              <TableCell className="text-xs" onClick={(e) => { e.stopPropagation(); }}>
-                                <Checkbox
-                                  checked={isSelected}
-                                  onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
-                                />
-                              </TableCell>
-                              <TableCell className="text-xs">
-                                {isExpanded ? (
-                                  <ChevronDown className="h-3.5 w-3.5" />
-                                ) : (
-                                  <ChevronRight className="h-3.5 w-3.5" />
-                                )}
-                              </TableCell>
+                          <TableRow 
+                            key={order.id}
+                            className="hover:bg-muted/50 group"
+                          >
+                              {failedFilterTab === 'needs-review' && (
+                                <TableCell className="text-xs" onClick={(e) => { e.stopPropagation(); }}>
+                                  <Checkbox
+                                    checked={isSelected}
+                                    onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
+                                  />
+                                </TableCell>
+                              )}
                               <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center">
                                 <button
                                   onClick={() => markFailedOrderAsReviewed(order.id, !order.resolved_at)}
@@ -2217,12 +2419,12 @@ const QueueView = () => {
                               <TableCell className="text-xs whitespace-nowrap">
                                 {getErrorTypeBadge(order.error_type)}
                               </TableCell>
-                              <TableCell className="text-xs">
+                              {/* <TableCell className="text-xs">
                                 {order.retry_count || 0}
-                              </TableCell>
-                              <TableCell className="text-xs">
+                              </TableCell> */}
+                              {/* <TableCell className="text-xs">
                                 {order.last_retry_at ? formatDate(order.last_retry_at) : '-'}
-                              </TableCell>
+                              </TableCell> */}
                               <TableCell className="text-xs whitespace-nowrap">
                                 {order.upload ? (
                                   <div>
@@ -2231,224 +2433,18 @@ const QueueView = () => {
                                   </div>
                                 ) : '-'}
                               </TableCell>
-                              <TableCell className="text-xs" onClick={(e) => e.stopPropagation()}>
-                                <div className="flex items-center gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-xs"
+                              <TableCell className="w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l" style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
+                                <div className="flex items-center gap-2 justify-center">
+                                  <span
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      retryOrder(order.id);
+                                      setViewingOrderDetails(order);
+                                      setOrderDetailsDialogOpen(true);
                                     }}
+                                    className="text-xs cursor-pointer hover:underline"
                                   >
-                                    <RotateCcw className="h-3 w-3 mr-1" />
-                                    Retry
-                                  </Button>
-                                </div>
-                              </TableCell>
-                            </TableRow>
-                            {isExpanded && (
-                              <TableRow>
-                                <TableCell colSpan={12} className="bg-muted/30">
-                                  <div className="p-3 space-y-3">
-                                    {/* Order Header with Actions */}
-                                    <div className="flex items-center justify-between mb-2">
-                                      <div className="text-xs font-semibold text-gray-700">Order: {order.order_key}</div>
-                                      <div className="flex items-center gap-1">
-                                        {(order.sale_payload || order.sale_order_payload || order.what_is_needed) && (
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setViewingOrderPayload(order);
-                                              setJsonModalOpen(true);
-                                            }}
-                                            className="h-7 w-7 p-0"
-                                            title="View JSON payloads (dev)"
-                                          >
-                                            <Code className="h-3 w-3 text-muted-foreground" />
-                                          </Button>
-                                        )}
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            retryOrder(order.id);
-                                          }}
-                                          className="h-7 text-xs px-2"
-                                        >
-                                          <RotateCcw className="h-3 w-3 mr-1" />
-                                          Retry
-                                        </Button>
-                                      </div>
-                                    </div>
-
-                                    {/* Error Message */}
-                                    {order.error_message && (
-                                      <div>
-                                        <div className="font-semibold text-xs">
-                                          Error Message: <span className="text-red-600 font-normal">{order.error_message}</span>
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    {/* Order Details - reuse existing renderPayloadTable */}
-                                    {(order.sale_payload || order.sale_order_payload) && (
-                                      <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                                        {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
-                                        {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
-                                      </div>
-                                    )}
-                                  </div>
-                                </TableCell>
-                              </TableRow>
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-              </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="completed">
-            {/* Sync'd Orders View */}
-            <div className="space-y-4">
-              {/* Sync'd Orders Table */}
-              <div className="overflow-x-auto">
-                {completedOrdersLoading && isCompletedOrdersInitialLoad ? (
-                  <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                ) : filteredAndSortedCompletedOrders.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">No sync'd orders found</div>
-                ) : (
-                  <div className="border-[1px] rounded-md overflow-hidden bg-white">
-                    <Table className="border-0">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-12 text-center">Reviewed</TableHead>
-                          <TableHead>Order</TableHead>
-                          <TableHead>Customer</TableHead>
-                          <TableHead>PO #</TableHead>
-                          <TableHead>
-                            <button
-                              onClick={() => {
-                                if (dateSortDirection === null) {
-                                  setDateSortDirection('desc');
-                                } else if (dateSortDirection === 'desc') {
-                                  setDateSortDirection('asc');
-                                } else {
-                                  setDateSortDirection(null);
-                                }
-                              }}
-                              className="flex items-center gap-1 hover:opacity-70 transition-opacity text-left"
-                            >
-                              Completed At
-                              {dateSortDirection === 'asc' && <ArrowUp className="h-3 w-3" />}
-                              {dateSortDirection === 'desc' && <ArrowDown className="h-3 w-3" />}
-                            </button>
-                          </TableHead>
-                          <TableHead>Open in Cin7</TableHead>
-                          <TableHead>Source Upload</TableHead>
-                          <TableHead>Actions</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                      {filteredAndSortedCompletedOrders.map((order) => {
-                        const isExpanded = expandedCompletedOrders.has(order.id);
-                        // Extract customer and PO from sale_payload if not in order data
-                        const customerName = order.customer_name || 
-                          (order.sale_payload && (order.sale_payload.Customer || order.sale_payload.customer_name)) || 
-                          '-';
-                        const poNumber = order.po_number || 
-                          (order.sale_payload && (order.sale_payload.CustomerReference || order.sale_payload.customer_reference)) || 
-                          '-';
-                        
-                        return (
-                          <React.Fragment key={order.id}>
-                            <TableRow 
-                              className="cursor-pointer hover:bg-muted/50"
-                              onClick={() => {
-                                const newExpanded = new Set(expandedCompletedOrders);
-                                if (newExpanded.has(order.id)) {
-                                  newExpanded.delete(order.id);
-                                } else {
-                                  newExpanded.add(order.id);
-                                }
-                                setExpandedCompletedOrders(newExpanded);
-                              }}
-                            >
-                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center">
-                                <button
-                                  onClick={() => markOrderAsReviewed(order.id, !order.reviewed)}
-                                  className="hover:opacity-80 transition-opacity inline-flex items-center justify-center"
-                                  title={order.reviewed ? "Mark as unreviewed" : "Mark as reviewed"}
-                                >
-                                  {order.reviewed ? (
-                                    <div className="h-4 w-4 rounded-full bg-green-500 flex items-center justify-center">
-                                      <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
-                                    </div>
-                                  ) : (
-                                    <Circle className="h-4 w-4 text-gray-400" />
-                                  )}
-                                </button>
-                              </TableCell>
-                              <TableCell>
-                                <span className="font-medium">{order.order_key}</span>
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap">
-                                {customerName}
-                              </TableCell>
-                              <TableCell>
-                                {poNumber}
-                              </TableCell>
-                              <TableCell>
-                                {formatDate(order.processed_at)}
-                              </TableCell>
-                              <TableCell onClick={(e) => e.stopPropagation()}>
-                                {order.sale_id ? (
-                                  <a
-                                    href={`https://inventory.dearsystems.com/Sale#${order.sale_id}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
-                                  >
-                                    Open in Cin7
-                                  </a>
-                                ) : '-'}
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap">
-                                {order.upload ? (
-                                  <div className="text-xs">
-                                    <div className="font-medium">{order.upload.filename}</div>
-                                    <div className="text-muted-foreground">{formatDate(order.upload.created_at)}</div>
-                                  </div>
-                                ) : '-'}
-                              </TableCell>
-                              <TableCell onClick={(e) => e.stopPropagation()}>
-                                <div className="flex items-center gap-2">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      const newExpanded = new Set(expandedCompletedOrders);
-                                      if (newExpanded.has(order.id)) {
-                                        newExpanded.delete(order.id);
-                                      } else {
-                                        newExpanded.add(order.id);
-                                      }
-                                      setExpandedCompletedOrders(newExpanded);
-                                    }}
-                                    className="h-7 text-xs px-0"
-                                  >
-                                    {isExpanded ? 'Hide Details' : 'See Details'}
-                                  </Button>
+                                    Details
+                                  </span>
                                   {(order.sale_payload || order.sale_order_payload || order.what_is_needed || order.order_data) && (
                                     <Button
                                       variant="ghost"
@@ -2467,35 +2463,191 @@ const QueueView = () => {
                                 </div>
                               </TableCell>
                             </TableRow>
-                            {isExpanded && (
-                              <TableRow>
-                                <TableCell colSpan={8} className="bg-muted/30">
-                                  <div className="p-4 space-y-4">
-
-                                    {/* Order Details - reuse existing renderPayloadTable */}
-                                    {(order.sale_payload || order.sale_order_payload) && (
-                                      <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                                        {order.sale_payload && renderPayloadTable(order.sale_payload, "Order Details", false, order.matching_details, order)}
-                                        {order.sale_order_payload && renderPayloadTable(order.sale_order_payload, "Line Items", false, order.matching_details, order)}
-                                      </div>
-                                    )}
-
-                                  </div>
-                                </TableCell>
-                              </TableRow>
-                            )}
-                          </React.Fragment>
                         );
                       })}
                       </TableBody>
                     </Table>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="completed" className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
+            {/* Sync'd Orders View */}
+            <div className="flex-1 flex flex-col min-h-0 relative">
+              {/* Sync'd Orders Table */}
+              {completedOrdersLoading && isCompletedOrdersInitialLoad ? (
+                <div className="text-center py-8 text-muted-foreground">Loading...</div>
+              ) : filteredAndSortedCompletedOrders.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No sync'd orders found</div>
+              ) : (
+                <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0 relative">
+                  <div 
+                    className="flex-1 overflow-auto" 
+                    ref={completedOrdersScrollRef} 
+                    id="completed-orders-scroll-container"
+                  >
+                    <Table className="border-0 border-separate border-spacing-0">
+                      <TableHeader>
+                        <TableRow>
+                          {reviewFilterTab === 'needs-review' && (
+                            <TableHead className="w-10 h-8 py-1">
+                              <Checkbox
+                                checked={selectedOrderIds.size === filteredAndSortedCompletedOrders.length && filteredAndSortedCompletedOrders.length > 0 && filteredAndSortedCompletedOrders.every(o => selectedOrderIds.has(o.id))}
+                                onCheckedChange={(checked) => {
+                                  if (checked) {
+                                    setSelectedOrderIds(new Set(filteredAndSortedCompletedOrders.map(o => o.id)));
+                                  } else {
+                                    setSelectedOrderIds(new Set());
+                                  }
+                                }}
+                              />
+                            </TableHead>
+                          )}
+                          <TableHead className="text-xs font-semibold w-12 text-center h-8 py-1">Reviewed</TableHead>
+                          <TableHead className="text-xs font-semibold min-w-[120px] h-8 py-1">Order</TableHead>
+                          <TableHead className="text-xs font-semibold min-w-[180px] h-8 py-1">Customer</TableHead>
+                          <TableHead className="text-xs font-semibold min-w-[120px] h-8 py-1">PO #</TableHead>
+                          <TableHead className="text-xs font-semibold min-w-[110px] h-8 py-1">
+                            <button
+                              onClick={() => {
+                                if (dateSortDirection === null) {
+                                  setDateSortDirection('desc');
+                                } else if (dateSortDirection === 'desc') {
+                                  setDateSortDirection('asc');
+                                } else {
+                                  setDateSortDirection(null);
+                                }
+                              }}
+                              className="flex items-center gap-1 hover:opacity-70 transition-opacity text-left font-semibold"
+                            >
+                              Completed At
+                              {dateSortDirection === 'asc' && <ArrowUp className="h-3 w-3" />}
+                              {dateSortDirection === 'desc' && <ArrowDown className="h-3 w-3" />}
+                            </button>
+                          </TableHead>
+                          <TableHead className="text-xs font-semibold min-w-[200px] h-8 py-1">Source Upload</TableHead>
+                          <TableHead className="text-xs font-semibold w-auto sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l text-center h-8 py-1" style={{ borderLeft: '1px solid hsl(var(--border))' }}>Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                      {filteredAndSortedCompletedOrders.map((order, index) => {
+                        const isLastRow = index === filteredAndSortedCompletedOrders.length - 1;
+                        // Extract customer and PO from sale_payload if not in order data
+                        const customerName = order.customer_name || 
+                          (order.sale_payload && (order.sale_payload.Customer || order.sale_payload.customer_name)) || 
+                          '-';
+                        const poNumber = order.po_number || 
+                          (order.sale_payload && (order.sale_payload.CustomerReference || order.sale_payload.customer_reference)) || 
+                          '-';
+                        
+                        const isSelected = selectedOrderIds.has(order.id);
+                        
+                        return (
+                          <TableRow 
+                            key={order.id}
+                            className="cursor-pointer hover:bg-muted/50 group"
+                            onDoubleClick={() => {
+                              setViewingOrderDetails(order);
+                              setOrderDetailsDialogOpen(true);
+                            }}
+                          >
+                              {reviewFilterTab === 'needs-review' && (
+                                <TableCell onClick={(e) => { e.stopPropagation(); }} className="cursor-default py-1.5" style={{ height: 'auto' }}>
+                                  <Checkbox
+                                    checked={isSelected}
+                                    onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
+                                  />
+                                </TableCell>
+                              )}
+                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center py-1.5" style={{ height: 'auto' }}>
+                                <button
+                                  onClick={() => markOrderAsReviewed(order.id, !order.reviewed)}
+                                  className="hover:opacity-80 transition-opacity inline-flex items-center justify-center"
+                                  title={order.reviewed ? "Mark as unreviewed" : "Mark as reviewed"}
+                                >
+                                  {order.reviewed ? (
+                                    <div className="h-4 w-4 rounded-full bg-green-500 flex items-center justify-center">
+                                      <Check className="h-2.5 w-2.5 text-white stroke-[3]" />
+                                    </div>
+                                  ) : (
+                                    <Circle className="h-4 w-4 text-gray-400" />
+                                  )}
+                                </button>
+                              </TableCell>
+                              <TableCell className="min-w-[120px] py-1.5" style={{ height: 'auto' }}>
+                                <span className="font-medium">{order.order_key}</span>
+                              </TableCell>
+                              <TableCell className="min-w-[180px] whitespace-nowrap py-1.5" style={{ height: 'auto' }}>
+                                {customerName}
+                              </TableCell>
+                              <TableCell className="min-w-[120px] py-1.5" style={{ height: 'auto' }} onClick={(e) => e.stopPropagation()}>
+                                {order.sale_id ? (
+                                  <a
+                                    href={`https://inventory.dearsystems.com/Sale#${order.sale_id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 hover:text-blue-800 hover:underline font-medium inline-flex items-center gap-1"
+                                  >
+                                    <span>{poNumber}</span>
+                                    <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                ) : (
+                                  poNumber
+                                )}
+                              </TableCell>
+                              <TableCell className="min-w-[110px] py-1.5" style={{ height: 'auto' }}>
+                                {formatDate(order.processed_at)}
+                              </TableCell>
+                              <TableCell className="text-xs whitespace-nowrap min-w-[200px] py-1.5" style={{ height: 'auto' }}>
+                                {order.upload ? (
+                                  <div>
+                                    <div className="font-medium">{order.upload.filename}</div>
+                                    <div className="text-muted-foreground text-[10px]">{formatDate(order.upload.created_at)}</div>
+                                  </div>
+                                ) : '-'}
+                              </TableCell>
+                              <TableCell className="w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l" style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setViewingOrderDetails(order);
+                                      setOrderDetailsDialogOpen(true);
+                                    }}
+                                    className="text-xs cursor-pointer hover:underline"
+                                  >
+                                    Details
+                                  </span>
+                                  {(order.sale_payload || order.sale_order_payload || order.what_is_needed || order.order_data) && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setViewingOrderPayload(order);
+                                        setJsonModalOpen(true);
+                                      }}
+                                      className="h-7 w-7 p-0"
+                                      title="View JSON payloads (dev)"
+                                    >
+                                      <Code className="h-3 w-3 text-muted-foreground" />
+                                    </Button>
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                        );
+                      })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
             </div>
           </TabsContent>
         </Tabs>
-      </div>
       
       {/* JSON Payload Modal */}
       <Dialog open={jsonModalOpen} onOpenChange={setJsonModalOpen}>
@@ -2503,15 +2655,8 @@ const QueueView = () => {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Code className="h-5 w-5" />
-              {viewingOrderPayload?.order_results && Array.isArray(viewingOrderPayload.order_results) ? 'Upload API Logs' : 'Order Payload Details'}
+              Debug Logs
             </DialogTitle>
-            <DialogDescription>
-              {viewingOrderPayload?.order_results && Array.isArray(viewingOrderPayload.order_results)
-                ? `API logs for upload: ${viewingOrderPayload.upload?.filename || 'N/A'}`
-                : viewingOrderPayload?.order_data?.attempted_send === false 
-                  ? "Prepared payloads (not sent to Cin7)" 
-                  : "Payloads sent to Cin7"}
-            </DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-auto space-y-6">
             {/* Error Message */}
@@ -2522,6 +2667,61 @@ const QueueView = () => {
               </div>
             )}
             
+            {/* Search Queries - Show what was searched for customers/products */}
+            {viewingOrderPayload?.matching_details && (
+              <div className="p-3 bg-blue-50 rounded border border-blue-200">
+                <div className="text-sm font-semibold text-blue-800 mb-3">Search Queries:</div>
+                <div className="space-y-3">
+                  {/* Customer Search Queries */}
+                  {viewingOrderPayload.matching_details.customer?.search_queries && viewingOrderPayload.matching_details.customer.search_queries.length > 0 && (
+                    <div>
+                      <div className="text-xs font-semibold text-blue-700 mb-1">Customer:</div>
+                      <div className="space-y-1">
+                        {viewingOrderPayload.matching_details.customer.search_queries.map((query, idx) => (
+                          <div key={idx} className="text-xs text-blue-600 font-mono bg-white px-2 py-1 rounded border border-blue-200">
+                            {query.api_endpoint ? (
+                              <span>{query.api_endpoint.replace('...', query.value)}</span>
+                            ) : (
+                              <span>{query.type}: {query.value}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Product Search Queries */}
+                  {viewingOrderPayload.matching_details.products && viewingOrderPayload.matching_details.products.length > 0 && (
+                    <div>
+                      <div className="text-xs font-semibold text-blue-700 mb-1">Products:</div>
+                      <div className="space-y-1">
+                        {viewingOrderPayload.matching_details.products
+                          .filter(p => p.search_queries && p.search_queries.length > 0)
+                          .map((product, idx) => (
+                            <div key={idx} className="space-y-1">
+                              <div className="text-xs font-medium text-blue-700">SKU: {product.sku}</div>
+                              {product.search_queries.map((query, qIdx) => (
+                                <div key={qIdx} className="text-xs text-blue-600 font-mono bg-white px-2 py-1 rounded border border-blue-200 ml-2">
+                                  {query.api_endpoint ? (
+                                    <span>{query.api_endpoint.replace('...', query.value)}</span>
+                                  ) : (
+                                    <span>{query.type}: {query.value}</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {(!viewingOrderPayload.matching_details.customer?.search_queries || viewingOrderPayload.matching_details.customer.search_queries.length === 0) &&
+                   (!viewingOrderPayload.matching_details.products || viewingOrderPayload.matching_details.products.filter(p => p.search_queries && p.search_queries.length > 0).length === 0) && (
+                    <div className="text-xs text-blue-600 italic">No search queries available (data may have been found in cache)</div>
+                  )}
+                </div>
+              </div>
+            )}
             
             {/* Helper function to render payload as JSON */}
             {(() => {
@@ -2686,7 +2886,17 @@ const QueueView = () => {
                                     )}
                                     {log.created_at && (
                                       <span className="text-xs text-gray-500">
-                                        {new Date(log.created_at).toLocaleTimeString()}
+                                        {(() => {
+                                          let dateStr = log.created_at;
+                                          if (!dateStr.endsWith('Z') && !dateStr.match(/[+-]\d{2}:\d{2}$/)) {
+                                            dateStr = dateStr + 'Z';
+                                          }
+                                          return new Date(dateStr).toLocaleTimeString('en-US', {
+                                            hour: 'numeric',
+                                            minute: '2-digit',
+                                            hour12: true
+                                          });
+                                        })()}
                                       </span>
                                     )}
                                   </div>
@@ -2760,6 +2970,81 @@ const QueueView = () => {
                 </>
               );
             })()}
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Order Details Dialog */}
+      <Dialog open={orderDetailsDialogOpen} onOpenChange={setOrderDetailsDialogOpen}>
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 flex-1 min-w-0">
+              {viewingOrderDetails && (
+                <>
+                  <span className="whitespace-nowrap">
+                    {viewingOrderDetails.po_number || 
+                      (viewingOrderDetails.sale_payload && (viewingOrderDetails.sale_payload.CustomerReference || viewingOrderDetails.sale_payload.customer_reference)) || 
+                      '-'} - Event Details
+                  </span>
+                  {viewingOrderDetails.error_type && (() => {
+                    const typeLabels = {
+                      'customer_not_found': 'Customer Not Found',
+                      'missing_fields': 'Missing Fields',
+                      'data_missing': 'Data Missing',
+                      'api_error': 'API Error',
+                      'validation_error': 'Data Missing',
+                      'duplicate_po': 'Duplicate PO',
+                      'partial_success': 'Partial Success'
+                    };
+                    
+                    const typeColors = {
+                      'customer_not_found': 'bg-red-500',
+                      'missing_fields': 'bg-orange-500',
+                      'data_missing': 'bg-red-500',
+                      'api_error': 'bg-purple-500',
+                      'validation_error': 'bg-red-500',
+                      'duplicate_po': 'bg-blue-500',
+                      'partial_success': 'bg-orange-500'
+                    };
+                    
+                    return (
+                      <Badge className={cn(
+                        typeColors[viewingOrderDetails.error_type] || 'bg-gray-500', 
+                        'text-white text-xs px-2.5 py-0.5 font-semibold tracking-[0.02em] shadow-none flex items-center flex-shrink-0'
+                      )}>
+                        {typeLabels[viewingOrderDetails.error_type] || viewingOrderDetails.error_type}
+                      </Badge>
+                    );
+                  })()}
+                </>
+              )}
+              {!viewingOrderDetails && 'Event Details'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-auto space-y-4">
+            {viewingOrderDetails && (
+              <>
+                {/* Error Message for Failed Orders */}
+                {viewingOrderDetails.error_message && (
+                  <div className="p-3 bg-red-50 rounded-md border border-red-200">
+                    <div className="font-semibold text-xs text-red-800 mb-1">Error Message:</div>
+                    <div className="text-sm text-red-700 break-words">{viewingOrderDetails.error_message}</div>
+                  </div>
+                )}
+                {/* Order Details - reuse existing renderPayloadTable */}
+                {(viewingOrderDetails.sale_payload || viewingOrderDetails.sale_order_payload) && (
+                  <div className="space-y-3">
+                    {viewingOrderDetails.sale_payload && renderPayloadTable(viewingOrderDetails.sale_payload, "Order Details", false, viewingOrderDetails.matching_details, viewingOrderDetails)}
+                    {viewingOrderDetails.sale_order_payload && renderPayloadTable(viewingOrderDetails.sale_order_payload, "Line Items", false, viewingOrderDetails.matching_details, viewingOrderDetails)}
+                  </div>
+                )}
+                {!viewingOrderDetails.sale_payload && !viewingOrderDetails.sale_order_payload && (
+                  <div className="text-center py-8 text-muted-foreground">
+                    No order details available
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -2889,54 +3174,110 @@ const QueueView = () => {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>
-              Add Review Notes ({bulkReviewIndex + 1} of {bulkReviewOrders.length})
+              {bulkReviewMode === 'all' 
+                ? `Mark ${selectedOrderIds.size} Order(s) as Reviewed`
+                : `Add Review Notes (${bulkReviewIndex + 1} of ${bulkReviewOrders.length})`}
             </DialogTitle>
             <DialogDescription>
-              Reviewing: <strong>{bulkReviewOrders[bulkReviewIndex]?.order_key || 'N/A'}</strong>
+              {bulkReviewMode === 'all' 
+                ? 'These orders will be marked as reviewed with the notes you provide.'
+                : `Reviewing: ${bulkReviewOrders[bulkReviewIndex]?.order_key || 'N/A'}`}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="bulk-preset-select">Preset Options (Optional)</Label>
-              <Select value={reviewNotesPreset} onValueChange={(value) => {
-                setReviewNotesPreset(value);
-                setReviewNotes(value);
-              }}>
-                <SelectTrigger id="bulk-preset-select">
-                  <SelectValue placeholder="Select a preset or leave blank for custom notes" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Manually adjusted in Cin7">Manually adjusted in Cin7</SelectItem>
-                  <SelectItem value="Reviewed">Reviewed</SelectItem>
-                  <SelectItem value="Issue resolved">Issue resolved</SelectItem>
-                  <SelectItem value="No action needed">No action needed</SelectItem>
-                </SelectContent>
-              </Select>
+            {/* Mode Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md border">
+              <div className="flex flex-col">
+                <Label className="text-sm font-medium">Review Mode</Label>
+                <span className="text-xs text-gray-500">
+                  {bulkReviewMode === 'all' 
+                    ? 'Mark all orders as reviewed at once'
+                    : 'Review each order one by one'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-600">One by one</span>
+                <Switch
+                  checked={bulkReviewMode === 'all'}
+                  onCheckedChange={(checked) => {
+                    setBulkReviewMode(checked ? 'all' : 'one-by-one');
+                    // Clear notes when switching modes
+                    setReviewNotes('');
+                    setReviewNotesPreset('');
+                    setBulkNotes('');
+                  }}
+                />
+                <span className="text-xs text-gray-600">All at once</span>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="bulk-review-notes">Review Notes *</Label>
-              <textarea
-                id="bulk-review-notes"
-                className="w-full min-h-[100px] px-3 py-2 text-sm border border-input rounded-md bg-transparent resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-                value={reviewNotes}
-                onChange={(e) => setReviewNotes(e.target.value)}
-                placeholder="Enter review notes or select a preset above"
-                required
-              />
-            </div>
+
+            {bulkReviewMode === 'all' ? (
+              /* All at once mode - simple notes input */
+              <div className="space-y-2">
+                <Label htmlFor="bulk-notes">Review Notes *</Label>
+                <Textarea
+                  id="bulk-notes"
+                  placeholder="Enter review notes for all selected orders..."
+                  value={bulkNotes}
+                  onChange={(e) => setBulkNotes(e.target.value)}
+                  className="min-h-[100px]"
+                  required
+                />
+              </div>
+            ) : (
+              /* One by one mode - with preset options */
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="bulk-preset-select">Preset Options (Optional)</Label>
+                  <Select value={reviewNotesPreset} onValueChange={(value) => {
+                    setReviewNotesPreset(value);
+                    setReviewNotes(value);
+                  }}>
+                    <SelectTrigger id="bulk-preset-select">
+                      <SelectValue placeholder="Select a preset or leave blank for custom notes" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Manually adjusted in Cin7">Manually adjusted in Cin7</SelectItem>
+                      <SelectItem value="Reviewed">Reviewed</SelectItem>
+                      <SelectItem value="Issue resolved">Issue resolved</SelectItem>
+                      <SelectItem value="No action needed">No action needed</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="bulk-review-notes">Review Notes *</Label>
+                  <Textarea
+                    id="bulk-review-notes"
+                    className="min-h-[100px]"
+                    value={reviewNotes}
+                    onChange={(e) => setReviewNotes(e.target.value)}
+                    placeholder="Enter review notes or select a preset above"
+                    required
+                  />
+                </div>
+              </>
+            )}
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => {
               setBulkReviewModalOpen(false);
               setReviewNotes('');
               setReviewNotesPreset('');
+              setBulkNotes('');
               setBulkReviewOrders([]);
               setBulkReviewIndex(0);
             }}>
               Cancel
             </Button>
-            <Button onClick={submitBulkReview} disabled={!reviewNotes.trim()}>
-              {bulkReviewIndex < bulkReviewOrders.length - 1 ? 'Next' : 'Finish'}
+            <Button 
+              onClick={submitBulkReview} 
+              disabled={bulkReviewMode === 'all' ? !bulkNotes.trim() : !reviewNotes.trim()}
+            >
+              {bulkReviewMode === 'all' 
+                ? 'Mark as Reviewed'
+                : bulkReviewIndex < bulkReviewOrders.length - 1 
+                  ? 'Next' 
+                  : 'Finish'}
             </Button>
           </div>
         </DialogContent>

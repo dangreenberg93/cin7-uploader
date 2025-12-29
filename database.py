@@ -118,6 +118,10 @@ class ClientSettings(db.Model):
     default_batch_size = Column(Integer, default=50, nullable=False)
     default_batch_delay = Column(Float, default=45.0, nullable=False)  # seconds
     
+    # Auto-create settings
+    auto_create_customers = Column(Boolean, default=False, nullable=False)
+    auto_create_products = Column(Boolean, default=False, nullable=False)
+    
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
@@ -239,6 +243,8 @@ class CachedCustomer(db.Model):
     client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
     cin7_customer_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     customer_data = Column(JSON, nullable=False)
+    is_new = Column(Boolean, default=False, nullable=False, index=True)
+    created_via_auto_create = Column(Boolean, default=False, nullable=False)
     cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -256,5 +262,45 @@ class CachedProduct(db.Model):
     cin7_product_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     sku = Column(String(255), nullable=False, index=True)
     product_data = Column(JSON, nullable=False)
+    is_new = Column(Boolean, default=False, nullable=False, index=True)
+    created_via_auto_create = Column(Boolean, default=False, nullable=False)
     cached_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    upload_mappings = relationship('ProductUploadMapping', 
+                                   foreign_keys='ProductUploadMapping.cin7_product_id',
+                                   primaryjoin='CachedProduct.cin7_product_id == ProductUploadMapping.cin7_product_id',
+                                   viewonly=True)
+
+
+class CustomerUploadMapping(db.Model):
+    """Maps customers to the uploads that created them and orders that used them"""
+    __tablename__ = 'customer_upload_mapping'
+    __table_args__ = {'schema': 'cin7_uploader'}
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
+    cin7_customer_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Cin7 customer ID
+    upload_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_upload.id', ondelete='CASCADE'), nullable=False, index=True)
+    order_ids = Column(JSON, nullable=True)  # Array of order IDs (SalesOrderResult.id) from this upload that used this customer
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    
+    # Relationships
+    upload = relationship('SalesOrderUpload')
+
+
+class ProductUploadMapping(db.Model):
+    """Maps products to the uploads that created them and orders that used them"""
+    __tablename__ = 'product_upload_mapping'
+    __table_args__ = {'schema': 'cin7_uploader'}
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_erp_credentials_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # References voyager.client_erp_credentials.id
+    cin7_product_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Cin7 product ID
+    upload_id = Column(UUID(as_uuid=True), ForeignKey('cin7_uploader.sales_order_upload.id', ondelete='CASCADE'), nullable=False, index=True)
+    order_ids = Column(JSON, nullable=True)  # Array of order IDs (SalesOrderResult.id) from this upload that used this product
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    
+    # Relationships
+    upload = relationship('SalesOrderUpload')

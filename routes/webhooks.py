@@ -12,7 +12,7 @@ import re
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
-from database import db, SalesOrderUpload, SalesOrderResult, ClientSettings, ClientCsvMapping, Cin7ApiLog, Client, UserClient
+from database import db, SalesOrderUpload, SalesOrderResult, ClientSettings, ClientCsvMapping, Cin7ApiLog, Client, UserClient, CachedCustomer, CachedProduct, CustomerUploadMapping, ProductUploadMapping
 from cin7_sales.api_client import Cin7SalesAPI
 from cin7_sales.csv_parser import CSVParser
 from cin7_sales.validator import SalesOrderValidator
@@ -402,17 +402,44 @@ def process_single_order(
     order_data['column_mapping'] = column_mapping
     
     # Keep backward compatibility with old field names
-    order_data['customer_name'] = primary_row.get('CustomerName') or primary_row.get('customer_name', '') or order_data.get('customername', '')
+    # Try to get customer name from multiple sources:
+    # 1. From order_data (cleaned field name from mapped columns)
+    # 2. From primary_row (CSV column names)
+    # 3. From order_data with different casing
+    order_data['customer_name'] = (
+        order_data.get('customer_name', '') or  # From mapped columns (cleaned field name)
+        order_data.get('customername', '') or   # Alternative casing
+        primary_row.get(column_mapping.get('CustomerName', '')) or  # From CSV using mapped column name
+        primary_row.get('CustomerName') or 
+        primary_row.get('customer_name', '') or 
+        primary_row.get('Customer Name') or  # CSV column might have space
+        ''
+    )
     order_data['po_number'] = primary_row.get('CustomerReference') or primary_row.get('po_number', '') or order_data.get('customerreference', '')
     order_data['order_date'] = primary_row.get('SaleDate') or primary_row.get('order_date', '') or order_data.get('saledate', '')
     order_data['order_number'] = primary_row.get('SaleOrderNumber') or primary_row.get('order_number', '') or order_data.get('saleordernumber', '')
+    
+    # Initialize sale_id early to avoid UnboundLocalError in exception handler
+    sale_id = None
+    sale_order_id = None
     
     try:
         # Always use combined approach (single API call with nested Order)
         use_combined_approach = True
         
         # Check customer lookup first (needed for TaxRule in combined call)
-        customer_name = primary_row.get('CustomerName') or primary_row.get('customer_name') or ''
+        # Get customer name from multiple sources to ensure we capture it
+        # First check order_data (has cleaned field names from mapped columns), then primary_row (raw CSV)
+        customer_name_col = column_mapping.get('CustomerName', '')
+        customer_name = (
+            order_data.get('customer_name', '') or  # From mapped columns (cleaned field name)
+            order_data.get('customername', '') or   # Alternative casing (all lowercase)
+            (primary_row.get(customer_name_col) if customer_name_col else None) or  # From CSV using mapped column name
+            primary_row.get('CustomerName') or 
+            primary_row.get('customer_name') or 
+            primary_row.get('Customer Name') or  # CSV column might have space
+            ''
+        ).strip()
         customer_data = None
         
         # Collect detailed matching information before API call
@@ -422,22 +449,82 @@ def process_single_order(
             'missing_fields': []
         }
         
-        if customer_name:
-            customer_data = builder._lookup_customer_by_name(customer_name)
+        # Always ensure customer name is in matching_details, even if empty, so error messages can use it
+        # Get customer name from order_data first (most reliable source)
+        customer_name_for_matching = customer_name or order_data.get('customer_name', '') or order_data.get('customername', '')
+        
+        if customer_name_for_matching:
+            # Extract AdditionalAttribute1 if available
+            additional_attribute1 = primary_row.get('AdditionalAttribute1') or primary_row.get('additional_attribute1')
+            customer_data = builder._lookup_customer_by_name(customer_name_for_matching, additional_attribute1)
+            
+            # Build search query info for debugging (always include, whether found or not)
+            search_queries = []
+            if additional_attribute1:
+                search_queries.append({'type': 'AdditionalAttribute1', 'value': additional_attribute1, 'api_endpoint': f'/customer?AdditionalAttribute1={additional_attribute1}'})
+            search_queries.append({'type': 'name', 'value': customer_name_for_matching, 'api_endpoint': f'/customer?name={customer_name_for_matching}'})
+            
             if customer_data:
+                # Check if customer was auto-created by looking at cache
+                # This captures the state at order creation time and memorializes it in order_data
+                # so that even if cache flags change later, the order's historical record still shows
+                # whether the customer was newly created for this specific order
+                customer_id = customer_data.get('ID')
+                was_auto_created = False
+                if customer_id:
+                    try:
+                        customer_id_uuid = uuid.UUID(str(customer_id))
+                        cached_customer = CachedCustomer.query.filter_by(
+                            client_erp_credentials_id=credential_id_for_logging,
+                            cin7_customer_id=customer_id_uuid
+                        ).first()
+                        if cached_customer:
+                            # Capture the auto-created state from cache at order creation time
+                            was_auto_created = cached_customer.created_via_auto_create or cached_customer.is_new
+                    except (ValueError, AttributeError):
+                        pass  # If ID is invalid, just skip the check
+                
                 matching_details['customer'] = {
-                    'name': customer_name,
+                    'name': customer_name_for_matching,
                     'found': True,
                     'cin7_id': customer_data.get('ID'),
                     'cin7_name': customer_data.get('Name'),
-                    'tax_rule': customer_data.get('TaxRule')  # Store TaxRule for later use
+                    'tax_rule': customer_data.get('TaxRule'),  # Store TaxRule for later use
+                    'search_queries': search_queries,
+                    'auto_created': was_auto_created  # Memorialized in order_data - persists even if cache flags change
                 }
             else:
                 matching_details['customer'] = {
-                    'name': customer_name,
+                    'name': customer_name_for_matching,
                     'found': False,
-                    'error': f'Customer "{customer_name}" not found in Cin7'
+                    'error': f'Customer "{customer_name_for_matching}" not found in Cin7',
+                    'search_queries': search_queries
                 }
+        else:
+            # Even if no customer name found in initial extraction, try order_data as fallback
+            # This ensures matching_details always has the customer name for error messages
+            fallback_customer_name = (order_data.get('customer_name', '') or 
+                                    order_data.get('customername', '') or 
+                                    '').strip()
+            matching_details['customer'] = {
+                'name': fallback_customer_name,
+                'found': False,
+                'error': 'Customer name not provided' if not fallback_customer_name else f'Customer "{fallback_customer_name}" not found in Cin7',
+                'search_queries': [{'type': 'name', 'value': fallback_customer_name, 'api_endpoint': f'/customer?name={fallback_customer_name}'}] if fallback_customer_name else []
+            }
+        
+        # Final fallback: ensure matching_details['customer']['name'] is always populated from order_data
+        # This handles cases where customer_name extraction might have failed but order_data has it
+        if not matching_details['customer'].get('name'):
+            final_customer_name = (order_data.get('customer_name', '') or 
+                                 order_data.get('customername', '') or 
+                                 '').strip()
+            if final_customer_name:
+                matching_details['customer']['name'] = final_customer_name
+                if 'error' not in matching_details['customer'] or not matching_details['customer'].get('error'):
+                    matching_details['customer']['error'] = f'Customer "{final_customer_name}" not found in Cin7'
+                if 'search_queries' not in matching_details['customer']:
+                    matching_details['customer']['search_queries'] = [{'type': 'name', 'value': final_customer_name, 'api_endpoint': f'/customer?name={final_customer_name}'}]
         
         # Build Sale payload (without Order - will create separately)
         sale_data = builder.build_sale(primary_row, column_mapping)
@@ -459,18 +546,45 @@ def process_single_order(
                 sku = row.get(sku_col, '')
                 if sku:
                     product = builder._lookup_product_by_sku(sku)
+                    # Build search query info for debugging (always include, whether found or not)
+                    search_queries = [
+                        {'type': 'SKU', 'value': sku, 'api_endpoint': f'/product?SKU={sku}'}
+                    ]
+                    
                     if product:
+                        # Check if product was auto-created by looking at cache
+                        # This captures the state at order creation time and memorializes it in order_data
+                        # so that even if cache flags change later, the order's historical record still shows
+                        # whether the product was newly created for this specific order
+                        product_id = product.get('ID')
+                        was_auto_created = False
+                        if product_id:
+                            try:
+                                product_id_uuid = uuid.UUID(str(product_id))
+                                cached_product = CachedProduct.query.filter_by(
+                                    client_erp_credentials_id=credential_id_for_logging,
+                                    cin7_product_id=product_id_uuid
+                                ).first()
+                                if cached_product:
+                                    # Capture the auto-created state from cache at order creation time
+                                    was_auto_created = cached_product.created_via_auto_create or cached_product.is_new
+                            except (ValueError, AttributeError):
+                                pass  # If ID is invalid, just skip the check
+                        
                         matching_details['products'].append({
                             'sku': sku,
                             'found': True,
                             'cin7_id': product.get('ID'),
-                            'cin7_name': product.get('Name')
+                            'cin7_name': product.get('Name'),
+                            'search_queries': search_queries,
+                            'auto_created': was_auto_created  # Memorialized in order_data - persists even if cache flags change
                         })
                     else:
                         matching_details['products'].append({
                             'sku': sku,
                             'found': False,
-                            'error': f'Product SKU "{sku}" not found in Cin7'
+                            'error': f'Product SKU "{sku}" not found in Cin7',
+                            'search_queries': search_queries
                         })
         
         # Check for missing required fields and build "what's needed" payload
@@ -505,10 +619,84 @@ def process_single_order(
         # Build Sale Order payload for "what's needed" (separate from Sale)
         # This shows what the Sale Order payload would look like
         sale_order_for_what_is_needed = None
-        if len(order_rows) > 1:
-            sale_order_for_what_is_needed = builder.build_sale_order_from_rows(order_rows, column_mapping, '<SALE_ID_PLACEHOLDER>', customer_data=customer_data)
-        else:
-            sale_order_for_what_is_needed = builder.build_sale_order(order_rows[0], column_mapping, '<SALE_ID_PLACEHOLDER>', customer_data=customer_data)
+        try:
+            if len(order_rows) > 1:
+                sale_order_for_what_is_needed = builder.build_sale_order_from_rows(order_rows, column_mapping, '<SALE_ID_PLACEHOLDER>', customer_data=customer_data)
+            else:
+                sale_order_for_what_is_needed = builder.build_sale_order(order_rows[0], column_mapping, '<SALE_ID_PLACEHOLDER>', customer_data=customer_data)
+        except ValueError as e:
+            # If TaxRule error occurs, still try to build a partial order for display
+            error_str = str(e)
+            if "TaxRule is required" in error_str:
+                logger.warning(f"TaxRule error when building order for display: {error_str}. Building order with all products for display.")
+                # Build order structure with ALL products (matched and unmatched) for display
+                sale_order_for_what_is_needed = {
+                    'SaleID': '<SALE_ID_PLACEHOLDER>',
+                    'Lines': []
+                }
+                
+                # Add all products from order_rows to Lines
+                sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
+                if sku_col and order_rows:
+                    for row in order_rows:
+                        sku = str(row.get(sku_col, '')).strip() if sku_col in row else None
+                        if sku:
+                            # Find product in matching_details or lookup
+                            product_match = None
+                            product_data = None
+                            
+                            # Check matching_details
+                            if matching_details.get('products'):
+                                product_match = next((p for p in matching_details['products'] if p.get('sku') == sku), None)
+                            
+                            # If not in matching_details, try to lookup in builder cache
+                            if not product_match and builder:
+                                product_data = builder._lookup_product_by_sku(sku)
+                                if product_data and product_data.get('ID'):
+                                    # Add to matching_details
+                                    product_match = {
+                                        'sku': sku,
+                                        'found': True,
+                                        'cin7_id': product_data.get('ID')
+                                    }
+                                    matching_details['products'].append(product_match)
+                            
+                            # Extract quantity and price from row
+                            qty_col = column_mapping.get('Quantity') or column_mapping.get('QuantityOrdered')
+                            price_col = column_mapping.get('Price') or column_mapping.get('UnitPrice')
+                            
+                            quantity = None
+                            if qty_col and qty_col in row:
+                                try:
+                                    qty_val = str(row[qty_col]).replace('$', '').replace(',', '').strip()
+                                    quantity = float(qty_val) if qty_val else None
+                                except (ValueError, TypeError):
+                                    quantity = None
+                            
+                            price = None
+                            if price_col and price_col in row:
+                                try:
+                                    price_val = str(row[price_col]).replace('$', '').replace(',', '').strip()
+                                    price = float(price_val) if price_val else None
+                                except (ValueError, TypeError):
+                                    price = None
+                            
+                            # Determine if product was found
+                            is_found = product_match and product_match.get('found')
+                            product_id = product_match.get('cin7_id') if product_match else (product_data.get('ID') if product_data else None)
+                            
+                            # Build line item
+                            line_item = {
+                                'SKU': sku,
+                                'ProductID': product_id,
+                                'Quantity': quantity if quantity is not None else 0,
+                                'Price': price if price is not None else 0,
+                                '_not_found': not is_found,
+                                '_error': f'Product SKU "{sku}" not found in Cin7' if not is_found else None
+                            }
+                            sale_order_for_what_is_needed['Lines'].append(line_item)
+            else:
+                raise  # Re-raise if it's a different error
         
         # Debug: Log if lines are empty
         if sale_order_for_what_is_needed and (not sale_order_for_what_is_needed.get('Lines') or len(sale_order_for_what_is_needed.get('Lines', [])) == 0):
@@ -545,6 +733,497 @@ def process_single_order(
                 if active_duplicates:
                     duplicate_sales = active_duplicates
                     logger.warning(f"Found {len(duplicate_sales)} existing non-voided sale(s) with PO number {customer_reference} (filtered out {len(existing_sales) - len(duplicate_sales)} voided sale(s))")
+        
+        # Note: Auto-create is now handled in Phase 1 (before order processing)
+        # This section is kept for backward compatibility but should not be needed
+        # if Phase 1 auto-create completed successfully
+        auto_create_customers_products = settings.get('auto_create_customers_products', False)
+        
+        # Auto-create customer if not found and setting is enabled
+        # (This is a fallback - Phase 1 should have already created all customers)
+        if not matching_details['customer'].get('found') and customer_name and auto_create_customers_products:
+            logger.info(f"Auto-creating customer '{customer_name}' (auto_create_customers_products enabled)")
+            try:
+                # Build customer payload
+                customer_payload = {
+                    'Name': customer_name,
+                    'Status': 'Active',
+                    'Currency': settings.get('default_currency', 'USD'),
+                    'PaymentTerm': '30 days'
+                }
+                
+                # Add required fields from settings
+                if settings.get('customer_account_receivable'):
+                    customer_payload['AccountReceivable'] = settings['customer_account_receivable']
+                if settings.get('customer_revenue_account'):
+                    customer_payload['RevenueAccount'] = settings['customer_revenue_account']
+                
+                # TaxRule - need to convert UUID to Name
+                tax_rule_uuid = settings.get('customer_tax_rule')
+                if tax_rule_uuid:
+                    try:
+                        # Get tax rules to find the name
+                        tax_rules = api_client.get_tax_rules()
+                        for rule in tax_rules:
+                            if str(rule.get('ID')) == str(tax_rule_uuid):
+                                customer_payload['TaxRule'] = rule.get('Name')
+                                break
+                        if 'TaxRule' not in customer_payload:
+                            logger.warning(f"Tax rule UUID {tax_rule_uuid} not found, customer creation may fail")
+                    except Exception as e:
+                        logger.warning(f"Could not fetch tax rules: {e}")
+                
+                if settings.get('customer_attribute_set'):
+                    customer_payload['AttributeSet'] = settings['customer_attribute_set']
+                
+                # Add AdditionalAttribute1 from CSV if mapped
+                if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
+                    attr_col = column_mapping['AdditionalAttribute1']
+                    if attr_col in primary_row:
+                        attr_value = primary_row[attr_col]
+                        if attr_value and str(attr_value).strip():
+                            customer_payload['AdditionalAttribute1'] = str(attr_value).strip()
+                
+                # Create customer
+                create_success, create_message, create_response = api_client.create_customer(customer_payload)
+                
+                if create_success and create_response:
+                    # Extract customer ID from response
+                    # Response may be direct customer object or wrapped in CustomerList
+                    customer_data = None
+                    if isinstance(create_response, dict):
+                        if 'ID' in create_response:
+                            # Direct customer object
+                            customer_data = create_response
+                        elif 'CustomerList' in create_response and isinstance(create_response['CustomerList'], list) and len(create_response['CustomerList']) > 0:
+                            # Wrapped in CustomerList array
+                            customer_data = create_response['CustomerList'][0]
+                    
+                    if not customer_data:
+                        logger.error(f"Customer created but response format unexpected: {create_response}")
+                        customer_id = None
+                    else:
+                        customer_id = customer_data.get('ID')
+                    
+                    if customer_id:
+                        try:
+                            customer_id_uuid = uuid.UUID(str(customer_id))
+                        except (ValueError, AttributeError):
+                            logger.error(f"Invalid customer ID format: {customer_id}")
+                            customer_id_uuid = None
+                        
+                        if customer_id_uuid:
+                            # Refresh customer cache and mark as new
+                            from routes.sales import refresh_single_customer_cache
+                            refresh_single_customer_cache(credential_id_for_logging, customer_id_uuid, customer_data, is_new=True)
+                            
+                            # Small delay to ensure database cache is updated
+                            import time
+                            time.sleep(0.1)
+                            
+                            # Update builder's preloaded_customers so it can be found immediately
+                            customer_name_clean = customer_name.strip()
+                            builder.preloaded_customers[customer_name_clean] = customer_data
+                            builder.preloaded_customers[customer_name_clean.upper()] = customer_data
+                            builder.preloaded_customers[customer_name_clean.lower()] = customer_data
+                            
+                            # Get additional_attribute1 if available
+                            additional_attribute1 = None
+                            if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
+                                attr_col = column_mapping['AdditionalAttribute1']
+                                if attr_col in primary_row:
+                                    attr_value = primary_row[attr_col]
+                                    if attr_value and str(attr_value).strip():
+                                        additional_attribute1 = str(attr_value).strip()
+                            
+                            # Clear ALL cache entries for this customer name (to handle any additional_attribute1 variations)
+                            cache_keys_to_remove = [key for key in builder._customer_cache.keys() if key.startswith(f"{customer_name_clean}|")]
+                            for key in cache_keys_to_remove:
+                                del builder._customer_cache[key]
+                            
+                            # Update cache with the new customer (with and without additional_attribute1)
+                            cache_key_with_attr = f"{customer_name_clean}|{additional_attribute1}"
+                            cache_key_no_attr = f"{customer_name_clean}|None"
+                            builder._customer_cache[cache_key_with_attr] = customer_data
+                            builder._customer_cache[cache_key_no_attr] = customer_data
+                            
+                            # Force refresh from database cache to ensure consistency
+                            db.session.commit()  # Ensure cache write is committed
+                            cached_customer = CachedCustomer.query.filter_by(
+                                client_erp_credentials_id=credential_id_for_logging,
+                                cin7_customer_id=customer_id_uuid
+                            ).first()
+                            if cached_customer and cached_customer.customer_data:
+                                import json
+                                cached_data = json.loads(cached_customer.customer_data) if isinstance(cached_customer.customer_data, str) else cached_customer.customer_data
+                                # Ensure we're using the latest data from cache
+                                builder.preloaded_customers[customer_name_clean] = cached_data
+                                builder.preloaded_customers[customer_name_clean.upper()] = cached_data
+                                builder.preloaded_customers[customer_name_clean.lower()] = cached_data
+                                builder._customer_cache[cache_key_with_attr] = cached_data
+                                builder._customer_cache[cache_key_no_attr] = cached_data
+                                logger.info(f"Refreshed customer '{customer_name}' from database cache after auto-create")
+                            
+                            # Update matching details and customer_data
+                            matching_details['customer'] = {
+                                'name': customer_name,
+                                'found': True,
+                                'cin7_id': customer_id,
+                                'cin7_name': customer_data.get('Name'),
+                                'tax_rule': customer_data.get('TaxRule'),
+                                'auto_created': True
+                            }
+                            
+                            # Update sale_data with CustomerID
+                            sale_data['CustomerID'] = customer_id
+                            sale_data['Customer'] = customer_name
+                            
+                            logger.info(f"Successfully auto-created customer '{customer_name}' with ID {customer_id}")
+                        else:
+                            logger.error(f"Could not convert customer ID to UUID: {customer_id}")
+                    else:
+                        logger.error(f"Customer created but no ID in response: {create_response}")
+                        # Try to extract from CustomerList if present
+                        if isinstance(create_response, dict) and 'CustomerList' in create_response:
+                            customer_list = create_response.get('CustomerList', [])
+                            if customer_list and len(customer_list) > 0:
+                                customer_data = customer_list[0]
+                                customer_id = customer_data.get('ID')
+                                if customer_id:
+                                    logger.info(f"Extracted customer ID from CustomerList: {customer_id}")
+                                    # Retry with extracted customer
+                                    try:
+                                        customer_id_uuid = uuid.UUID(str(customer_id))
+                                        from routes.sales import refresh_single_customer_cache
+                                        refresh_single_customer_cache(credential_id_for_logging, customer_id_uuid, customer_data, is_new=True)
+                                        # Update builder cache
+                                        customer_name_clean = customer_name.strip()
+                                        builder.preloaded_customers[customer_name_clean] = customer_data
+                                        builder.preloaded_customers[customer_name_clean.upper()] = customer_data
+                                        builder.preloaded_customers[customer_name_clean.lower()] = customer_data
+                                        # Update matching details
+                                        matching_details['customer'] = {
+                                            'name': customer_name,
+                                            'found': True,
+                                            'cin7_id': customer_id,
+                                            'cin7_name': customer_data.get('Name'),
+                                            'tax_rule': customer_data.get('TaxRule'),
+                                            'auto_created': True
+                                        }
+                                        sale_data['CustomerID'] = customer_id
+                                        sale_data['Customer'] = customer_name
+                                        logger.info(f"Successfully auto-created customer '{customer_name}' with ID {customer_id} (extracted from CustomerList)")
+                                    except (ValueError, AttributeError) as e:
+                                        logger.error(f"Error processing extracted customer: {str(e)}")
+                else:
+                    # Check if customer already exists (409 error)
+                    if '409' in str(create_message) or 'already exists' in str(create_message).lower():
+                        logger.info(f"Customer '{customer_name}' already exists (409), attempting to look it up")
+                        # Try to look up the existing customer using API search
+                        try:
+                            customers = api_client.search_customer(name=customer_name)
+                            if customers and len(customers) > 0:
+                                existing_customer = customers[0]
+                                customer_id = existing_customer.get('ID')
+                                if customer_id:
+                                    try:
+                                        customer_id_uuid = uuid.UUID(str(customer_id))
+                                        # Refresh customer cache with existing customer
+                                        from routes.sales import refresh_single_customer_cache
+                                        refresh_single_customer_cache(credential_id_for_logging, customer_id_uuid, existing_customer, is_new=False)
+                                        logger.info(f"Found existing customer '{customer_name}' with ID {customer_id}")
+                                        
+                                        # Small delay
+                                        import time
+                                        time.sleep(0.1)
+                                        
+                                        # Update builder's preloaded_customers so it can be found immediately
+                                        customer_name_clean = customer_name.strip()
+                                        builder.preloaded_customers[customer_name_clean] = existing_customer
+                                        builder.preloaded_customers[customer_name_clean.upper()] = existing_customer
+                                        builder.preloaded_customers[customer_name_clean.lower()] = existing_customer
+                                        
+                                        # Get additional_attribute1 if available
+                                        additional_attribute1 = None
+                                        if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
+                                            attr_col = column_mapping['AdditionalAttribute1']
+                                            if attr_col in primary_row:
+                                                attr_value = primary_row[attr_col]
+                                                if attr_value and str(attr_value).strip():
+                                                    additional_attribute1 = str(attr_value).strip()
+                                        
+                                        # Clear ALL cache entries for this customer name
+                                        cache_keys_to_remove = [key for key in builder._customer_cache.keys() if key.startswith(f"{customer_name_clean}|")]
+                                        for key in cache_keys_to_remove:
+                                            del builder._customer_cache[key]
+                                        
+                                        # Update cache with the existing customer
+                                        cache_key_with_attr = f"{customer_name_clean}|{additional_attribute1}"
+                                        cache_key_no_attr = f"{customer_name_clean}|None"
+                                        builder._customer_cache[cache_key_with_attr] = existing_customer
+                                        builder._customer_cache[cache_key_no_attr] = existing_customer
+                                        
+                                        # Force commit
+                                        db.session.commit()
+                                        
+                                        # Update matching details and customer_data
+                                        customer_data = existing_customer
+                                        matching_details['customer'] = {
+                                            'name': customer_name,
+                                            'found': True,
+                                            'cin7_id': customer_id,
+                                            'cin7_name': existing_customer.get('Name'),
+                                            'tax_rule': existing_customer.get('TaxRule'),
+                                            'auto_created': False  # Not auto-created, already existed
+                                        }
+                                        
+                                        # Update sale_data with CustomerID
+                                        sale_data['CustomerID'] = customer_id
+                                        sale_data['Customer'] = customer_name
+                                    except (ValueError, AttributeError):
+                                        logger.error(f"Invalid customer ID format: {customer_id}")
+                            else:
+                                logger.warning(f"Customer '{customer_name}' reported as existing but not found in search")
+                        except Exception as e:
+                            logger.error(f"Error looking up existing customer '{customer_name}': {str(e)}", exc_info=True)
+                    else:
+                        logger.error(f"Failed to auto-create customer '{customer_name}': {create_message}")
+                        # Continue without customer - will fail later with proper error
+            except Exception as e:
+                logger.error(f"Error auto-creating customer '{customer_name}': {str(e)}", exc_info=True)
+                # Continue without customer - will fail later with proper error
+        
+        # Auto-create products if not found and setting is enabled
+        # Track auto-created product IDs for bulk cache refresh
+        auto_created_product_ids = []
+        
+        if auto_create_customers_products:
+            missing_products = [p for p in matching_details['products'] if not p.get('found')]
+            for missing_product in missing_products:
+                sku = missing_product.get('sku')
+                if not sku:
+                    continue
+                
+                logger.info(f"Auto-creating product with SKU '{sku}' (auto_create_customers_products enabled)")
+                try:
+                    # Get product name from CSV or use SKU
+                    product_name_col = column_mapping.get('ProductName') or column_mapping.get('Name')
+                    product_name = None
+                    if product_name_col:
+                        for row in order_rows:
+                            if product_name_col in row and row[product_name_col]:
+                                product_name = row[product_name_col]
+                                break
+                    
+                    if not product_name:
+                        product_name = sku  # Fallback to SKU
+                    
+                    # Build product payload
+                    product_payload = {
+                        'Name': product_name,
+                        'SKU': sku,
+                        'Status': 'Active',
+                        'Type': 'Stock',
+                        'CostingMethod': settings.get('product_costing_method', 'FIFO'),
+                        'PriceTiers': {
+                            settings.get('product_default_price_tier', 'Tier 1'): settings.get('product_default_price', 0.0)
+                        }
+                    }
+                    
+                    # Create product
+                    create_success, create_message, create_response = api_client.create_product(product_payload)
+                    
+                    if create_success and create_response:
+                        # Extract product ID from response
+                        # Response may be direct product object or wrapped in ProductList
+                        product_data = None
+                        if isinstance(create_response, dict):
+                            if 'ID' in create_response:
+                                # Direct product object
+                                product_data = create_response
+                            elif 'ProductList' in create_response and isinstance(create_response['ProductList'], list) and len(create_response['ProductList']) > 0:
+                                # Wrapped in ProductList array
+                                product_data = create_response['ProductList'][0]
+                        
+                        if not product_data:
+                            logger.error(f"Product created but response format unexpected: {create_response}")
+                            product_id = None
+                        else:
+                            product_id = product_data.get('ID')
+                        
+                        if product_id:
+                            try:
+                                product_id_uuid = uuid.UUID(str(product_id))
+                            except (ValueError, AttributeError):
+                                logger.error(f"Invalid product ID format: {product_id}")
+                                product_id_uuid = None
+                            
+                            if product_id_uuid:
+                                # Refresh product cache and mark as new
+                                from routes.sales import refresh_single_product_cache
+                                refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, product_data, is_new=True)
+                                
+                                # Small delay to ensure database cache is updated
+                                import time
+                                time.sleep(0.1)
+                                
+                                # Update builder's preloaded_products so it can be found immediately
+                                sku_clean = sku.strip()
+                                builder.preloaded_products[sku_clean] = product_data
+                                builder.preloaded_products[sku_clean.upper()] = product_data
+                                builder.preloaded_products[sku_clean.lower()] = product_data
+                                
+                                # Clear any cached None entries and update cache with the new product
+                                if sku_clean in builder._product_cache:
+                                    del builder._product_cache[sku_clean]
+                                if sku in builder._product_cache:
+                                    del builder._product_cache[sku]
+                                builder._product_cache[sku_clean] = product_data
+                                
+                                # Force commit to ensure cache is persisted
+                                db.session.commit()
+                                
+                                # Track product ID for bulk cache refresh
+                                auto_created_product_ids.append(product_id_uuid)
+                                
+                                logger.info(f"Successfully auto-created product SKU '{sku}' with ID {product_id}")
+                                
+                                # Update matching details
+                                for p in matching_details['products']:
+                                    if p.get('sku') == sku:
+                                        p['found'] = True
+                                        p['cin7_id'] = product_id
+                                        p['cin7_name'] = product_data.get('Name')
+                                        p['auto_created'] = True
+                                        break
+                            else:
+                                logger.error(f"Could not convert product ID to UUID: {product_id}")
+                        else:
+                            logger.error(f"Product created but no ID in response: {create_response}")
+                            # Try to extract from ProductList if present
+                            if isinstance(create_response, dict) and 'ProductList' in create_response:
+                                product_list = create_response.get('ProductList', [])
+                                if product_list and len(product_list) > 0:
+                                    product_data = product_list[0]
+                                    product_id = product_data.get('ID')
+                                    if product_id:
+                                        logger.info(f"Extracted product ID from ProductList: {product_id}")
+                                        # Retry with extracted product
+                                        try:
+                                            product_id_uuid = uuid.UUID(str(product_id))
+                                            from routes.sales import refresh_single_product_cache
+                                            refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, product_data, is_new=True)
+                                            # Update builder cache
+                                            sku_clean = sku.strip()
+                                            builder.preloaded_products[sku_clean] = product_data
+                                            builder.preloaded_products[sku_clean.upper()] = product_data
+                                            builder.preloaded_products[sku_clean.lower()] = product_data
+                                            if sku_clean in builder._product_cache:
+                                                del builder._product_cache[sku_clean]
+                                            if sku in builder._product_cache:
+                                                del builder._product_cache[sku]
+                                            builder._product_cache[sku_clean] = product_data
+                                            db.session.commit()
+                                            auto_created_product_ids.append(product_id_uuid)
+                                            # Update matching details
+                                            for p in matching_details['products']:
+                                                if p.get('sku') == sku:
+                                                    p['found'] = True
+                                                    p['cin7_id'] = product_id
+                                                    p['cin7_name'] = product_data.get('Name')
+                                                    p['auto_created'] = True
+                                                    break
+                                            logger.info(f"Successfully auto-created product SKU '{sku}' with ID {product_id} (extracted from ProductList)")
+                                        except (ValueError, AttributeError) as e:
+                                            logger.error(f"Error processing extracted product: {str(e)}")
+                    else:
+                        # Check if product already exists (409 error)
+                        if '409' in str(create_message) or 'already exists' in str(create_message).lower():
+                            logger.info(f"Product SKU '{sku}' already exists (409), attempting to look it up")
+                            # Try to look up the existing product using API search
+                            try:
+                                products = api_client.search_product(sku=sku)
+                                if products and len(products) > 0:
+                                    existing_product = products[0]
+                                    product_id = existing_product.get('ID')
+                                    if product_id:
+                                        try:
+                                            product_id_uuid = uuid.UUID(str(product_id))
+                                            # Refresh product cache with existing product
+                                            from routes.sales import refresh_single_product_cache
+                                            refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, existing_product, is_new=False)
+                                            logger.info(f"Found existing product SKU '{sku}' with ID {product_id}")
+                                            
+                                            # Small delay
+                                            import time
+                                            time.sleep(0.1)
+                                            
+                                            # Update builder's preloaded_products so it can be found immediately
+                                            sku_clean = sku.strip()
+                                            builder.preloaded_products[sku_clean] = existing_product
+                                            builder.preloaded_products[sku_clean.upper()] = existing_product
+                                            builder.preloaded_products[sku_clean.lower()] = existing_product
+                                            # Clear any cached None entries and update cache with the existing product
+                                            if sku_clean in builder._product_cache:
+                                                del builder._product_cache[sku_clean]
+                                            if sku in builder._product_cache:
+                                                del builder._product_cache[sku]
+                                            builder._product_cache[sku_clean] = existing_product
+                                            
+                                            # Force commit
+                                            db.session.commit()
+                                            
+                                            # Track product ID for cache refresh (even if already existed)
+                                            auto_created_product_ids.append(product_id_uuid)
+                                            
+                                            # Update matching details
+                                            for p in matching_details['products']:
+                                                if p.get('sku') == sku:
+                                                    p['found'] = True
+                                                    p['cin7_id'] = product_id
+                                                    p['cin7_name'] = existing_product.get('Name')
+                                                    p['auto_created'] = False  # Not auto-created, already existed
+                                                    break
+                                        except (ValueError, AttributeError):
+                                            logger.error(f"Invalid product ID format: {product_id}")
+                                else:
+                                    logger.warning(f"Product SKU '{sku}' reported as existing but not found in search")
+                            except Exception as e:
+                                logger.error(f"Error looking up existing product SKU '{sku}': {str(e)}", exc_info=True)
+                        else:
+                            logger.error(f"Failed to auto-create product SKU '{sku}': {create_message}")
+                            # Continue - product will be missing from order
+                except Exception as e:
+                    logger.error(f"Error auto-creating product SKU '{sku}': {str(e)}", exc_info=True)
+                    # Continue - product will be missing from order
+        
+        # After all auto-creates, refresh product cache from database using product IDs to ensure all newly created products are available
+        if auto_create_customers_products and auto_created_product_ids:
+            try:
+                db.session.commit()  # Ensure all cache writes are committed
+                # Refresh builder's product cache from database using product IDs
+                for product_id_uuid in auto_created_product_ids:
+                    cached_product = CachedProduct.query.filter_by(
+                        client_erp_credentials_id=credential_id_for_logging,
+                        cin7_product_id=product_id_uuid
+                    ).first()
+                    if cached_product and cached_product.product_data:
+                        import json
+                        product_data = json.loads(cached_product.product_data) if isinstance(cached_product.product_data, str) else cached_product.product_data
+                        sku = cached_product.sku
+                        if sku:
+                            sku_clean = sku.strip()
+                            # Update builder's cache
+                            builder.preloaded_products[sku_clean] = product_data
+                            builder.preloaded_products[sku_clean.upper()] = product_data
+                            builder.preloaded_products[sku_clean.lower()] = product_data
+                            builder._product_cache[sku_clean] = product_data
+                            if sku != sku_clean:
+                                builder._product_cache[sku] = product_data
+                            logger.debug(f"Refreshed product '{sku}' (ID: {product_id_uuid}) from database cache before building sale order")
+            except Exception as e:
+                logger.warning(f"Error refreshing product cache from database: {str(e)}", exc_info=True)
+                # Continue anyway - builder cache should already be updated
         
         # Check if we should even attempt to send to Cin7
         # CustomerID is required - if we don't have it, don't send
@@ -615,13 +1294,39 @@ def process_single_order(
         
         if not should_attempt_sale:
             # Don't send to Cin7 - customer not matched
-            enhanced_error = 'Cannot create Sale: CustomerID is required but customer was not found in Cin7'
+            error_parts = []
+            
+            # Customer error
             if not matching_details['customer'].get('found'):
-                enhanced_error += f" | Customer '{matching_details['customer'].get('name', 'N/A')}' not found in Cin7"
+                # Try to get customer name from matching_details first, then from order_data
+                customer_name = (matching_details['customer'].get('name', '') or 
+                               order_data.get('customer_name', '') or 
+                               primary_row.get('CustomerName') or 
+                               primary_row.get('customer_name', '')).strip()
+                if customer_name and customer_name != 'N/A':
+                    error_parts.append(f"Customer '{customer_name}' not found in Cin7")
+                else:
+                    error_parts.append("Customer not found in Cin7")
+            
+            # Product errors - summarize missing SKUs
+            missing_products = [p for p in matching_details.get('products', []) if not p.get('found')]
+            if missing_products:
+                missing_skus = [p.get('sku', 'N/A') for p in missing_products if p.get('sku')]
+                if missing_skus:
+                    if len(missing_skus) == 1:
+                        error_parts.append(f"SKU '{missing_skus[0]}' not found in Cin7")
+                    elif len(missing_skus) <= 3:
+                        sku_list = ', '.join([f"'{s}'" for s in missing_skus])
+                        error_parts.append(f"SKUs {sku_list} not found in Cin7")
+                    else:
+                        sku_list = ', '.join([f"'{s}'" for s in missing_skus[:3]])
+                        error_parts.append(f"SKUs {sku_list} and {len(missing_skus) - 3} more not found in Cin7")
+            
+            enhanced_error = ' | '.join(error_parts) if error_parts else 'Cannot create Sale: CustomerID is required but customer was not found in Cin7'
             
             order_result.status = 'failed'
             order_result.error_message = enhanced_error
-            order_result.error_type = categorize_error(enhanced_error)
+            order_result.error_type = 'data_missing'
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
@@ -639,7 +1344,133 @@ def process_single_order(
                 'matching_details': matching_details
             }
         
-        # Step 1: Create Sale first
+        # Step 0: Check products BEFORE creating sale
+        # If customer is found but NO products are found, don't create the sale/order
+        sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
+        filtered_order_rows = []
+        removed_products = []
+        
+        if sku_col:
+            for row in order_rows:
+                sku = str(row.get(sku_col, '')).strip()
+                if sku:
+                    # Check if product exists in cached/preloaded data
+                    product = builder._lookup_product_by_sku(sku)
+                    if product and product.get('ID'):
+                        # Product found - include in order
+                        filtered_order_rows.append(row)
+                    else:
+                        # Product not found - exclude from order and track it with full details
+                        # Extract quantity and price from row for display
+                        qty_col = column_mapping.get('Quantity') or column_mapping.get('QuantityOrdered')
+                        price_col = column_mapping.get('Price') or column_mapping.get('UnitPrice')
+                        
+                        quantity = None
+                        if qty_col and qty_col in row:
+                            try:
+                                qty_val = str(row[qty_col]).replace('$', '').replace(',', '').strip()
+                                quantity = float(qty_val) if qty_val else None
+                            except (ValueError, TypeError):
+                                quantity = None
+                        
+                        price = None
+                        if price_col and price_col in row:
+                            try:
+                                price_val = str(row[price_col]).replace('$', '').replace(',', '').strip()
+                                price = float(price_val) if price_val else None
+                            except (ValueError, TypeError):
+                                price = None
+                        
+                        removed_products.append({
+                            'sku': sku,
+                            'quantity': quantity,
+                            'price': price,
+                            'row_data': row
+                        })
+                        logger.warning(f"Product SKU '{sku}' not found in Cin7 - excluding from order {order_key}")
+                        
+                        # Update matching_details to mark this product as not found
+                        if 'products' not in matching_details:
+                            matching_details['products'] = []
+                        
+                        # Check if already in matching_details
+                        found_in_details = any(p.get('sku') == sku for p in matching_details['products'])
+                        if not found_in_details:
+                            matching_details['products'].append({
+                                'sku': sku,
+                                'found': False,
+                                'error': f'Product SKU "{sku}" not found in Cin7',
+                                'quantity': quantity,
+                                'price': price
+                            })
+                        else:
+                            # Update existing entry
+                            for product in matching_details['products']:
+                                if product.get('sku') == sku:
+                                    product['found'] = False
+                                    product['error'] = f'Product SKU "{sku}" not found in Cin7'
+                                    product['quantity'] = quantity
+                                    product['price'] = price
+                                    break
+                else:
+                    # No SKU - include row (will be handled by validation)
+                    filtered_order_rows.append(row)
+        else:
+            # No SKU column mapping - use all rows
+            filtered_order_rows = order_rows
+        
+        # If customer is found but NO products are found, don't create the sale/order
+        if matching_details['customer'].get('found') and not filtered_order_rows:
+            # Build detailed error message with SKUs
+            sku_messages = [f'{removed_product.get("sku", "")} not found in Cin7' for removed_product in removed_products]
+            if sku_messages:
+                error_msg = ', '.join(sku_messages)
+            else:
+                error_msg = 'No valid products found - all products were unmatched'
+            order_result.status = 'failed'
+            order_result.error_message = error_msg
+            order_result.error_type = categorize_error(error_msg)
+            
+            # Build a sale_order_payload with unmatched products for display
+            sale_order_payload_for_display = {
+                'SaleID': '<SALE_ID_PLACEHOLDER>',
+                'Lines': []
+            }
+            
+            # Add unmatched products as lines with "Not found" indicator
+            for removed_product in removed_products:
+                sku = removed_product.get('sku', '')
+                quantity = removed_product.get('quantity')
+                price = removed_product.get('price')
+                
+                line_item = {
+                    'SKU': sku,
+                    'ProductID': None,  # Not found
+                    'Quantity': quantity if quantity is not None else 0,
+                    'Price': price if price is not None else 0,
+                    '_not_found': True,  # Flag for frontend to show "Not found in Cin7"
+                    '_error': f'Product SKU "{sku}" not found in Cin7'
+                }
+                sale_order_payload_for_display['Lines'].append(line_item)
+            
+            order_result.order_data = {
+                **order_data,
+                'matching_details': matching_details,
+                'sale_payload': sale_data,
+                'sale_order_payload': sale_order_payload_for_display,
+                'removed_products': removed_products,
+                'all_rows': order_data.get('all_rows', [])
+            }
+            order_result.processed_at = datetime.utcnow()
+            db.session.commit()
+            return {
+                'status': 'failed',
+                'error_message': error_msg,
+                'order_data': order_result.order_data,
+                'matching_details': matching_details
+            }
+        
+        # Step 1: Create Sale (only if customer is found and at least one product is found)
         logger.info(f"Creating Sale for order {order_key}...")
         sale_success, sale_message, sale_response = api_client.create_sale(sale_data)
         sale_id = None
@@ -681,17 +1512,103 @@ def process_single_order(
             error_parts = [f'Failed to create Sale: {sale_message}']
             
             if not matching_details['customer'].get('found'):
-                error_parts.append(f"Customer issue: {matching_details['customer'].get('error', 'Customer not found')}")
+                # Try to get customer name from matching_details first, then from order_data
+                customer_name = (matching_details['customer'].get('name', '') or 
+                               order_data.get('customer_name', '') or 
+                               primary_row.get('CustomerName') or 
+                               primary_row.get('customer_name', '')).strip()
+                if customer_name and customer_name != 'N/A':
+                    error_parts.append(f"Customer '{customer_name}' not found in Cin7")
+                else:
+                    error_parts.append("Customer not found in Cin7")
             
             missing_products = [p for p in matching_details['products'] if not p.get('found')]
             if missing_products:
-                product_errors = [p.get('error', f"SKU {p.get('sku')} not found") for p in missing_products]
-                error_parts.append(f"Product issues: {', '.join(product_errors)}")
+                missing_skus = [p.get('sku', 'N/A') for p in missing_products if p.get('sku')]
+                if missing_skus:
+                    if len(missing_skus) == 1:
+                        error_parts.append(f"SKU '{missing_skus[0]}' not found in Cin7")
+                    elif len(missing_skus) <= 3:
+                        sku_list = ', '.join([f"'{s}'" for s in missing_skus])
+                        error_parts.append(f"SKUs {sku_list} not found in Cin7")
+                    else:
+                        sku_list = ', '.join([f"'{s}'" for s in missing_skus[:3]])
+                        error_parts.append(f"SKUs {sku_list} and {len(missing_skus) - 3} more not found in Cin7")
             
             if matching_details['missing_fields']:
                 error_parts.append(f"Missing required fields: {', '.join(matching_details['missing_fields'])}")
             
             enhanced_error = ' | '.join(error_parts)
+            
+            # Build sale_order_payload with ALL products (matched and unmatched) for display
+            # This ensures line items are shown even when sale creation fails (e.g., customer not found)
+            sale_order_payload_for_display = {
+                'SaleID': '<SALE_ID_PLACEHOLDER>',
+                'Lines': []
+            }
+            
+            # Get all products from order_rows
+            sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
+            if sku_col and order_rows:
+                for row in order_rows:
+                    sku = str(row.get(sku_col, '')).strip() if sku_col in row else None
+                    if sku:
+                        # Find product in matching_details or lookup
+                        product_match = None
+                        product_data = None
+                        
+                        # Check matching_details
+                        if matching_details.get('products'):
+                            product_match = next((p for p in matching_details['products'] if p.get('sku') == sku), None)
+                        
+                        # If not in matching_details, try to lookup in builder cache
+                        if not product_match and builder:
+                            product_data = builder._lookup_product_by_sku(sku)
+                            if product_data and product_data.get('ID'):
+                                # Add to matching_details
+                                if 'products' not in matching_details:
+                                    matching_details['products'] = []
+                                product_match = {
+                                    'sku': sku,
+                                    'found': True,
+                                    'cin7_id': product_data.get('ID')
+                                }
+                                matching_details['products'].append(product_match)
+                        
+                        # Extract quantity and price from row
+                        qty_col = column_mapping.get('Quantity') or column_mapping.get('QuantityOrdered')
+                        price_col = column_mapping.get('Price') or column_mapping.get('UnitPrice')
+                        
+                        quantity = None
+                        if qty_col and qty_col in row:
+                            try:
+                                qty_val = str(row[qty_col]).replace('$', '').replace(',', '').strip()
+                                quantity = float(qty_val) if qty_val else None
+                            except (ValueError, TypeError):
+                                quantity = None
+                        
+                        price = None
+                        if price_col and price_col in row:
+                            try:
+                                price_val = str(row[price_col]).replace('$', '').replace(',', '').strip()
+                                price = float(price_val) if price_val else None
+                            except (ValueError, TypeError):
+                                price = None
+                        
+                        # Determine if product was found
+                        is_found = product_match and product_match.get('found')
+                        product_id = product_match.get('cin7_id') if product_match else (product_data.get('ID') if product_data else None)
+                        
+                        # Build line item
+                        line_item = {
+                            'SKU': sku,
+                            'ProductID': product_id,
+                            'Quantity': quantity if quantity is not None else 0,
+                            'Price': price if price is not None else 0,
+                            '_not_found': not is_found,
+                            '_error': f'Product SKU "{sku}" not found in Cin7' if not is_found else None
+                        }
+                        sale_order_payload_for_display['Lines'].append(line_item)
             
             order_result.status = 'failed'
             order_result.error_message = enhanced_error
@@ -700,6 +1617,7 @@ def process_single_order(
                 **order_data,
                 'matching_details': matching_details,
                 'sale_payload': sale_data,
+                'sale_order_payload': sale_order_payload_for_display,  # Include all products for display
                 'sale_api_response': sale_api_response,
                 'what_is_needed': what_is_needed,
                 'attempted_send': True
@@ -736,67 +1654,56 @@ def process_single_order(
         # Step 2: Build and create Sale Order with the Sale ID
         logger.info(f"Creating Sale Order for order {order_key} with Sale ID {sale_id}...")
         
-        # Track unmatched products BEFORE building the sale order
-        # Filter out unmatched products and update matching_details
-        sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
-        filtered_order_rows = []
-        removed_products = []
+        # Use the already-filtered order rows from Step 0
+        # filtered_order_rows and removed_products are already set before sale creation
+        # If we reach here, it means customer was found and at least one product was found
         
-        if sku_col:
-            for row in order_rows:
-                sku = str(row.get(sku_col, '')).strip()
-                if sku:
-                    # Check if product exists in cached/preloaded data
-                    product = builder._lookup_product_by_sku(sku)
-                    if product and product.get('ID'):
-                        # Product found - include in order
-                        filtered_order_rows.append(row)
-                    else:
-                        # Product not found - exclude from order and track it
-                        removed_products.append({
-                            'sku': sku,
-                            'row_data': row
-                        })
-                        logger.warning(f"Product SKU '{sku}' not found in Cin7 - excluding from order {order_key}")
-                        
-                        # Update matching_details to mark this product as not found
-                        if 'products' not in matching_details:
-                            matching_details['products'] = []
-                        
-                        # Check if already in matching_details
-                        found_in_details = any(p.get('sku') == sku for p in matching_details['products'])
-                        if not found_in_details:
-                            matching_details['products'].append({
-                                'sku': sku,
-                                'found': False,
-                                'error': f'Product SKU "{sku}" not found in Cin7'
-                            })
-                        else:
-                            # Update existing entry
-                            for product in matching_details['products']:
-                                if product.get('sku') == sku:
-                                    product['found'] = False
-                                    product['error'] = f'Product SKU "{sku}" not found in Cin7'
-                                    break
-                else:
-                    # No SKU - include row (will be handled by validation)
-                    filtered_order_rows.append(row)
-        else:
-            # No SKU column mapping - use all rows
-            filtered_order_rows = order_rows
+        # Log if any products were filtered
+        if removed_products:
+            logger.info(f"Filtered out {len(removed_products)} unmatched product(s) from order {order_key}. Proceeding with {len(filtered_order_rows)} matched product(s).")
         
-        # Only proceed if we have at least one valid product
+        # Safety check: If somehow we have no filtered rows (shouldn't happen since we checked before sale creation)
         if not filtered_order_rows:
-            error_msg = 'No valid products found - all products were unmatched'
+            # Build detailed error message with SKUs
+            sku_messages = [f'{removed_product.get("sku", "")} not found in Cin7' for removed_product in removed_products]
+            if sku_messages:
+                error_msg = ', '.join(sku_messages)
+            else:
+                error_msg = 'No valid products found - all products were unmatched'
             order_result.status = 'failed'
             order_result.error_message = error_msg
             order_result.error_type = categorize_error(error_msg)
             order_result.sale_id = sale_id
+            
+            # Build a sale_order_payload with unmatched products for display
+            sale_order_payload_for_display = {
+                'SaleID': str(sale_id) if sale_id else '<SALE_ID_PLACEHOLDER>',
+                'Lines': []
+            }
+            
+            # Add unmatched products as lines with "Not found" indicator
+            for removed_product in removed_products:
+                sku = removed_product.get('sku', '')
+                quantity = removed_product.get('quantity')
+                price = removed_product.get('price')
+                
+                line_item = {
+                    'SKU': sku,
+                    'ProductID': None,  # Not found
+                    'Quantity': quantity if quantity is not None else 0,
+                    'Price': price if price is not None else 0,
+                    '_not_found': True,  # Flag for frontend to show "Not found in Cin7"
+                    '_error': f'Product SKU "{sku}" not found in Cin7'
+                }
+                sale_order_payload_for_display['Lines'].append(line_item)
+            
             order_result.order_data = {
                 **order_data,
                 'matching_details': matching_details,
                 'sale_payload': sale_data,
-                'removed_products': removed_products
+                'sale_order_payload': sale_order_payload_for_display,
+                'removed_products': removed_products,
+                'all_rows': order_data.get('all_rows', [])
             }
             order_result.processed_at = datetime.utcnow()
             db.session.commit()
@@ -807,16 +1714,74 @@ def process_single_order(
                 'matching_details': matching_details
             }
         
-        # Log if any products were filtered
-        if removed_products:
-            logger.info(f"Filtered out {len(removed_products)} unmatched product(s) from order {order_key}. Proceeding with {len(filtered_order_rows)} matched product(s).")
-        
         # Build sale order payload with filtered rows (only matched products)
         # Use sale_data_from_response (from create_sale response) for TaxRule lookup
-        if len(filtered_order_rows) > 1:
-            sale_order_data = builder.build_sale_order_from_rows(filtered_order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
-        else:
-            sale_order_data = builder.build_sale_order(filtered_order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
+        try:
+            if len(filtered_order_rows) > 1:
+                sale_order_data = builder.build_sale_order_from_rows(filtered_order_rows, column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
+            else:
+                sale_order_data = builder.build_sale_order(filtered_order_rows[0], column_mapping, str(sale_id), customer_data=customer_data, sale_data=sale_data_from_response)
+        except ValueError as e:
+            # If TaxRule error occurs, check if it's because customer is not found
+            error_str = str(e)
+            if "TaxRule is required" in error_str:
+                auto_create_customers_products = settings.get('auto_create_customers_products', False)
+                if not matching_details['customer'].get('found') and not auto_create_customers_products:
+                    # Customer not found and auto-create is off - return simple error
+                    error_parts = []
+                    # Try to get customer name from matching_details first, then from order_data
+                    customer_name = (matching_details['customer'].get('name', '') or 
+                                   order_data.get('customer_name', '') or 
+                                   primary_row.get('CustomerName') or 
+                                   primary_row.get('customer_name', '')).strip()
+                    if customer_name and customer_name != 'N/A':
+                        error_parts.append(f"Customer '{customer_name}' not found in Cin7")
+                    else:
+                        error_parts.append("Customer not found in Cin7")
+                    
+                    # Add missing SKUs if any
+                    missing_products = [p for p in matching_details.get('products', []) if not p.get('found')]
+                    if missing_products:
+                        missing_skus = [p.get('sku', 'N/A') for p in missing_products if p.get('sku')]
+                        if missing_skus:
+                            if len(missing_skus) == 1:
+                                error_parts.append(f"SKU '{missing_skus[0]}' not found in Cin7")
+                            elif len(missing_skus) <= 3:
+                                sku_list = ', '.join([f"'{s}'" for s in missing_skus])
+                                error_parts.append(f"SKUs {sku_list} not found in Cin7")
+                            else:
+                                sku_list = ', '.join([f"'{s}'" for s in missing_skus[:3]])
+                                error_parts.append(f"SKUs {sku_list} and {len(missing_skus) - 3} more not found in Cin7")
+                    
+                    enhanced_error = ' | '.join(error_parts) if error_parts else "Customer not found in Cin7"
+                    
+                    order_result.status = 'failed'
+                    order_result.error_message = enhanced_error
+                    order_result.error_type = 'data_missing'
+                    order_result.sale_id = sale_id
+                    order_result.order_data = {
+                        **order_data,
+                        'matching_details': matching_details,
+                        'sale_payload': sale_data,
+                        'sale_order_payload': sale_order_for_what_is_needed,
+                        'sale_api_response': sale_api_response,
+                        'what_is_needed': what_is_needed,
+                        'attempted_send': True
+                    }
+                    order_result.processed_at = datetime.utcnow()
+                    db.session.commit()
+                    return {
+                        'status': 'failed',
+                        'error_message': enhanced_error,
+                        'order_data': order_result.order_data,
+                        'matching_details': matching_details
+                    }
+                else:
+                    # TaxRule error for other reasons - re-raise
+                    raise
+            else:
+                # Different ValueError - re-raise
+                raise
         
         # Create Sale Order via API (should never fail with product not found since we filtered)
         so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
@@ -888,19 +1853,114 @@ def process_single_order(
             order_result.status = 'success'
             order_result.error_message = None
         
+        # Build complete sale_order_payload with ALL products (matched + unmatched) for display
+        sale_order_payload_complete = {
+            'SaleID': str(sale_id) if sale_id else '<SALE_ID_PLACEHOLDER>',
+            'Lines': []
+        }
+        
+        # Add matched products from sale_order_data
+        if sale_order_data and isinstance(sale_order_data, dict):
+            matched_lines = sale_order_data.get('Lines', [])
+            for line in matched_lines:
+                # Ensure matched products don't have _not_found flag
+                line_copy = dict(line)
+                line_copy['_not_found'] = False
+                sale_order_payload_complete['Lines'].append(line_copy)
+        
+        # Add unmatched products from removed_products
+        if removed_products:
+            for removed_product in removed_products:
+                sku = removed_product.get('sku', '')
+                quantity = removed_product.get('quantity')
+                price = removed_product.get('price')
+                
+                line_item = {
+                    'SKU': sku,
+                    'ProductID': None,  # Not found
+                    'Quantity': quantity if quantity is not None else 0,
+                    'Price': price if price is not None else 0,
+                    '_not_found': True,  # Flag for frontend to show "Not found in Cin7"
+                    '_error': f'Product SKU "{sku}" not found in Cin7'
+                }
+                sale_order_payload_complete['Lines'].append(line_item)
+        
         order_result.sale_id = sale_id
         order_result.sale_order_id = sale_order_id if sale_order_id else None
+        # Store order_data with matching_details - this memorializes the auto_created flags
+        # from the cache at order creation time, so they persist even if cache flags change later
         order_result.order_data = {
             **order_data,
-            'matching_details': matching_details,
+            'matching_details': matching_details,  # Contains auto_created flags captured at order creation time
             'sale_payload': sale_data,
-            'sale_order_payload': sale_order_data,
+            'sale_order_payload': sale_order_payload_complete,  # Use complete payload with all products
             'sale_api_response': sale_api_response,
             'sale_order_api_response': sale_order_api_response,
             'removed_products': removed_products if removed_products else None,  # Track which products were removed
             'partial_success': True if removed_products else False  # Flag to indicate some products were filtered
         }
         order_result.processed_at = datetime.utcnow()
+        
+        # Update upload mappings to link this order to the customers/products it uses
+        try:
+            # Get customer ID from order data
+            customer_id = None
+            if sale_data and isinstance(sale_data, dict):
+                customer_id = sale_data.get('Customer')
+            elif order_data and isinstance(order_data, dict):
+                customer_id = order_data.get('Customer')
+            
+            # Get product IDs from line items
+            product_ids = []
+            if sale_order_data and isinstance(sale_order_data, dict):
+                lines = sale_order_data.get('Lines', [])
+                for line in lines:
+                    if isinstance(line, dict) and 'ProductID' in line:
+                        product_ids.append(line['ProductID'])
+            
+            # Update customer mapping
+            if customer_id:
+                try:
+                    customer_id_uuid = uuid.UUID(str(customer_id))
+                    customer_mapping = CustomerUploadMapping.query.filter_by(
+                        client_erp_credentials_id=credential_id_for_logging,
+                        cin7_customer_id=customer_id_uuid,
+                        upload_id=upload_id
+                    ).first()
+                    
+                    if customer_mapping:
+                        # Add order_id to the list if not already present
+                        order_ids_list = customer_mapping.order_ids or []
+                        if str(order_result_id) not in [str(oid) for oid in order_ids_list]:
+                            order_ids_list.append(str(order_result_id))
+                            customer_mapping.order_ids = order_ids_list
+                            logger.debug(f"Updated customer mapping for customer {customer_id} with order {order_result_id}")
+                except (ValueError, AttributeError) as e:
+                    logger.debug(f"Could not parse customer ID for mapping update: {customer_id} - {str(e)}")
+            
+            # Update product mappings
+            for product_id in product_ids:
+                try:
+                    product_id_uuid = uuid.UUID(str(product_id))
+                    product_mapping = ProductUploadMapping.query.filter_by(
+                        client_erp_credentials_id=credential_id_for_logging,
+                        cin7_product_id=product_id_uuid,
+                        upload_id=upload_id
+                    ).first()
+                    
+                    if product_mapping:
+                        # Add order_id to the list if not already present
+                        order_ids_list = product_mapping.order_ids or []
+                        if str(order_result_id) not in [str(oid) for oid in order_ids_list]:
+                            order_ids_list.append(str(order_result_id))
+                            product_mapping.order_ids = order_ids_list
+                            logger.debug(f"Updated product mapping for product {product_id} with order {order_result_id}")
+                except (ValueError, AttributeError) as e:
+                    logger.debug(f"Could not parse product ID for mapping update: {product_id} - {str(e)}")
+        except Exception as mapping_error:
+            logger.warning(f"Failed to update upload mappings for order {order_result_id}: {str(mapping_error)}")
+            # Don't fail the order if mapping update fails
+        
         db.session.commit()
         
         return {
@@ -911,129 +1971,6 @@ def process_single_order(
         }
     
     except Exception as e:
-            if not sale_id:
-                order_result.status = 'failed'
-                order_result.error_message = 'Sale created but no ID returned'
-                order_result.error_type = categorize_error('Sale created but no ID returned')
-                order_result.order_data = order_data
-                order_result.processed_at = datetime.utcnow()
-                db.session.commit()
-                return {
-                    'status': 'failed',
-                    'error_message': 'Sale created but no ID returned',
-                    'order_data': order_data
-                }
-            
-            # Rate limiting delay between Sale and Sale Order
-            delay = settings.get('default_delay_between_orders', 0.7)
-            time.sleep(delay)
-            
-            # Step 2: Build and create Sale Order
-            # Note: sale_order_data was already built above for "what_is_needed", but rebuild with actual sale_id
-            # TaxRule comes from customer_data or settings - no need to GET the Sale
-            logger.info(f"Step 2: Building Sale Order for order {order_key} with sale_id {sale_id}")
-            row_data_list = order_rows
-            sale_order_data = builder.build_sale_order_from_rows(row_data_list, column_mapping, str(sale_id), customer_data=customer_data)
-            
-            logger.info(f"Sale Order payload built for order {order_key}: SaleID={sale_order_data.get('SaleID')}, Lines count={len(sale_order_data.get('Lines', []))}, Total={sale_order_data.get('Total')}")
-            
-            # Create Sale Order via API
-            logger.info(f"Creating Sale Order via API for order {order_key}...")
-            so_success, so_message, so_response = api_client.create_sale_order(sale_order_data)
-            logger.info(f"Sale Order API call result for order {order_key}: success={so_success}, message={so_message}")
-            logger.info(f"Sale Order response type: {type(so_response)}, response: {so_response}")
-            
-            # Store API responses for display - use raw JSON text if available to preserve exact order
-            sale_order_api_response = None
-            if isinstance(so_response, dict):
-                sale_order_api_response_raw = so_response.get('_raw_json_text')
-                if sale_order_api_response_raw:
-                    sale_order_api_response = sale_order_api_response_raw
-                else:
-                    sale_order_api_response = so_response
-            elif isinstance(so_response, list) and len(so_response) > 0:
-                first_item = so_response[0] if isinstance(so_response[0], dict) else None
-                if first_item:
-                    sale_order_api_response_raw = first_item.get('_raw_json_text')
-                    if sale_order_api_response_raw:
-                        sale_order_api_response = sale_order_api_response_raw
-                    else:
-                        sale_order_api_response = first_item
-            else:
-                sale_order_api_response = so_response if so_response else None
-            
-            if so_success:
-                sale_order_id = None
-                if isinstance(so_response, dict):
-                    # Try multiple possible ID fields
-                    sale_order_id = (so_response.get('ID') or 
-                                   so_response.get('SaleOrderID') or 
-                                   so_response.get('SaleOrder') or
-                                   so_response.get('id'))
-                    logger.info(f"Extracted sale_order_id from dict: {sale_order_id}, response keys: {list(so_response.keys()) if isinstance(so_response, dict) else 'N/A'}")
-                elif isinstance(so_response, list) and len(so_response) > 0:
-                    first_item = so_response[0]
-                    if isinstance(first_item, dict):
-                        sale_order_id = (first_item.get('ID') or 
-                                       first_item.get('SaleOrderID') or 
-                                       first_item.get('SaleOrder') or
-                                       first_item.get('id'))
-                    logger.info(f"Extracted sale_order_id from list: {sale_order_id}")
-                
-                # If we still don't have an ID, log warning but don't fail - Sale Order might have been created
-                if not sale_order_id:
-                    logger.warning(f"Sale Order created successfully but no ID found in response for order {order_key}. Response: {so_response}")
-                    # Still mark as success since the API call succeeded - the Sale Order was likely created
-                    # The ID might be in the response but in an unexpected format
-                
-                order_result.status = 'success'
-                order_result.sale_id = sale_id
-                order_result.sale_order_id = sale_order_id if sale_order_id else None
-                # Store sale_payload and API responses for successful orders too (for reference)
-                order_result.order_data = {
-                    **order_data,
-                    'matching_details': matching_details,
-                    'sale_payload': sale_data,  # Store the payload that was sent
-                    'sale_api_response': sale_api_response,  # Store the API response
-                    'sale_order_payload': sale_order_data,  # Store the sale order payload that was sent
-                    'sale_order_api_response': sale_order_api_response  # Store the API response
-                }
-                order_result.processed_at = datetime.utcnow()
-                db.session.commit()
-                
-                return {
-                    'status': 'success',
-                    'sale_id': str(sale_id),
-                    'sale_order_id': str(sale_order_id) if sale_order_id else None,
-                    'order_data': order_result.order_data
-                }
-            else:
-                # Sale was created but Sale Order failed
-                error_msg = f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}'
-            order_result.status = 'failed'
-            order_result.sale_id = sale_id
-            order_result.error_message = error_msg
-            order_result.error_type = categorize_error(error_msg)
-            # Store sale_payload, sale_order_payload, API responses and matching details for reference
-            order_result.order_data = {
-                **order_data,
-                'matching_details': matching_details,
-                'sale_payload': sale_data,  # Store the payload that was sent
-                'sale_api_response': sale_api_response,  # Store the API response
-                'sale_order_payload': sale_order_data,  # Store the sale order payload that was sent
-                'sale_order_api_response': sale_order_api_response  # Store the API response (even if failed)
-            }
-            order_result.processed_at = datetime.utcnow()
-            db.session.commit()
-            
-            return {
-                'status': 'failed',
-                'sale_id': str(sale_id),
-                'error_message': f'Sale created (ID: {sale_id}) but Sale Order failed: {so_message}',
-                'order_data': order_result.order_data
-            }
-    
-    except Exception as e:
         error_msg = str(e)
         logger.error(f"Error processing order {order_key}: {error_msg}", exc_info=True)
         
@@ -1042,18 +1979,254 @@ def process_single_order(
             error_msg = "Missing required data in CSV. Please check that column mappings are configured correctly in the Mappings page. Required fields may be missing or empty."
         elif "No column mapping" in error_msg:
             error_msg = "Column mappings not configured. Please set up CSV column mappings in the Mappings page for this client."
+        elif "cannot access local variable 'sale_id'" in error_msg:
+            error_msg = f"Processing error: {error_msg}. This may indicate an issue with the order processing logic."
+        elif "TaxRule is required" in error_msg:
+            # Simplify TaxRule error if customer is not found and auto-create is off
+            auto_create_customers_products = settings.get('auto_create_customers_products', False)
+            if not matching_details['customer'].get('found') and not auto_create_customers_products:
+                error_parts = []
+                # Try to get customer name from matching_details first, then from order_data
+                customer_name = (matching_details['customer'].get('name', '') or 
+                               order_data.get('customer_name', '') or 
+                               primary_row.get('CustomerName') or 
+                               primary_row.get('customer_name', '')).strip()
+                if customer_name and customer_name != 'N/A':
+                    error_parts.append(f"Customer '{customer_name}' not found in Cin7")
+                else:
+                    error_parts.append("Customer not found in Cin7")
+                
+                # Add missing SKUs if any
+                missing_products = [p for p in matching_details.get('products', []) if not p.get('found')]
+                if missing_products:
+                    missing_skus = [p.get('sku', 'N/A') for p in missing_products if p.get('sku')]
+                    if missing_skus:
+                        if len(missing_skus) == 1:
+                            error_parts.append(f"SKU '{missing_skus[0]}' not found in Cin7")
+                        elif len(missing_skus) <= 3:
+                            sku_list = ', '.join([f"'{s}'" for s in missing_skus])
+                            error_parts.append(f"SKUs {sku_list} not found in Cin7")
+                        else:
+                            sku_list = ', '.join([f"'{s}'" for s in missing_skus[:3]])
+                            error_parts.append(f"SKUs {sku_list} and {len(missing_skus) - 3} more not found in Cin7")
+                
+                error_msg = ' | '.join(error_parts) if error_parts else "Customer not found in Cin7"
+            # Otherwise, keep the original TaxRule error message
+        
+        # Ensure order_data is populated even on error
+        if not order_data:
+            # Build order_data from available information
+            order_data = {
+                'customer_name': primary_row.get('CustomerName') or primary_row.get('customer_name', '') or '',
+                'po_number': primary_row.get('CustomerReference') or primary_row.get('po_number', '') or '',
+                'order_date': primary_row.get('SaleDate') or primary_row.get('order_date', '') or '',
+                'order_number': primary_row.get('SaleOrderNumber') or primary_row.get('order_number', '') or '',
+                'all_rows': [r for r in order_rows],
+                'column_mapping': column_mapping
+            }
+        
+        # Try to build sale/order payloads for display even if they failed
+        sale_payload_for_display = None
+        sale_order_payload_for_display = None
+        try:
+            if 'sale_data' not in locals():
+                sale_payload_for_display = builder.build_sale(primary_row, column_mapping) if builder else None
+            else:
+                sale_payload_for_display = sale_data
+        except:
+            pass  # Ignore errors when building for display
+        
+        try:
+            if 'sale_order_data' not in locals():
+                # First, check if sale_order_for_what_is_needed was already built (e.g., when customer not found)
+                # This happens when TaxRule error occurs and we build it with all products
+                if 'sale_order_for_what_is_needed' in locals() and sale_order_for_what_is_needed:
+                    # Check if it has Lines (it should if we built it properly)
+                    if sale_order_for_what_is_needed.get('Lines') and len(sale_order_for_what_is_needed.get('Lines', [])) > 0:
+                        # Use the already-built payload with all products
+                        sale_order_payload_for_display = sale_order_for_what_is_needed
+                    else:
+                        # It exists but has no lines - build it with products
+                        sale_order_payload_for_display = {
+                            'SaleID': '<SALE_ID_PLACEHOLDER>',
+                            'Lines': []
+                        }
+                        # Build lines from order_rows (same logic as below)
+                        sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
+                        if sku_col and order_rows:
+                            for row in order_rows:
+                                sku = str(row.get(sku_col, '')).strip() if sku_col in row else None
+                                if sku:
+                                    # Find product in matching_details or lookup
+                                    product_match = None
+                                    product_data = None
+                                    
+                                    if 'matching_details' in locals() and matching_details.get('products'):
+                                        product_match = next((p for p in matching_details['products'] if p.get('sku') == sku), None)
+                                    
+                                    if not product_match and builder:
+                                        product_data = builder._lookup_product_by_sku(sku)
+                                        if product_data and product_data.get('ID'):
+                                            if 'matching_details' not in locals():
+                                                matching_details = {'products': []}
+                                            elif 'products' not in matching_details:
+                                                matching_details['products'] = []
+                                            product_match = {
+                                                'sku': sku,
+                                                'found': True,
+                                                'cin7_id': product_data.get('ID')
+                                            }
+                                            matching_details['products'].append(product_match)
+                                    
+                                    # Extract quantity and price
+                                    qty_col = column_mapping.get('Quantity') or column_mapping.get('QuantityOrdered')
+                                    price_col = column_mapping.get('Price') or column_mapping.get('UnitPrice')
+                                    
+                                    quantity = None
+                                    if qty_col and qty_col in row:
+                                        try:
+                                            qty_val = str(row[qty_col]).replace('$', '').replace(',', '').strip()
+                                            quantity = float(qty_val) if qty_val else None
+                                        except (ValueError, TypeError):
+                                            quantity = None
+                                    
+                                    price = None
+                                    if price_col and price_col in row:
+                                        try:
+                                            price_val = str(row[price_col]).replace('$', '').replace(',', '').strip()
+                                            price = float(price_val) if price_val else None
+                                        except (ValueError, TypeError):
+                                            price = None
+                                    
+                                    is_found = product_match and product_match.get('found')
+                                    product_id = product_match.get('cin7_id') if product_match else (product_data.get('ID') if product_data else None)
+                                    
+                                    line_item = {
+                                        'SKU': sku,
+                                        'ProductID': product_id,
+                                        'Quantity': quantity if quantity is not None else 0,
+                                        'Price': price if price is not None else 0,
+                                        '_not_found': not is_found,
+                                        '_error': f'Product SKU \"{sku}\" not found in Cin7' if not is_found else None
+                                    }
+                                    sale_order_payload_for_display['Lines'].append(line_item)
+                else:
+                    # Build sale_order_payload with ALL products (matched and unmatched) for display
+                    # This ensures products are shown even when customer is not found
+                    sale_order_payload_for_display = {
+                        'SaleID': '<SALE_ID_PLACEHOLDER>',
+                        'Lines': []
+                    }
+                    
+                    # Ensure matching_details has products array
+                    if 'matching_details' not in locals():
+                        matching_details = {'products': []}
+                    elif 'products' not in matching_details:
+                        matching_details['products'] = []
+                    
+                    # Get all products from order_rows and matching_details
+                    sku_col = column_mapping.get('SKU') or column_mapping.get('sku')
+                    if sku_col and order_rows:
+                        for row in order_rows:
+                            sku = str(row.get(sku_col, '')).strip() if sku_col in row else None
+                            if sku:
+                                # Find product in matching_details or lookup
+                                product_match = None
+                                product_data = None
+                                
+                                # First check matching_details
+                                if matching_details.get('products'):
+                                    product_match = next((p for p in matching_details['products'] if p.get('sku') == sku), None)
+                                
+                                # If not in matching_details, try to lookup in builder cache
+                                if not product_match and builder:
+                                    product_data = builder._lookup_product_by_sku(sku)
+                                    if product_data and product_data.get('ID'):
+                                        # Add to matching_details so frontend can show check mark
+                                        product_match = {
+                                            'sku': sku,
+                                            'found': True,
+                                            'cin7_id': product_data.get('ID')
+                                        }
+                                        matching_details['products'].append(product_match)
+                                
+                                # Extract quantity and price from row
+                                qty_col = column_mapping.get('Quantity') or column_mapping.get('QuantityOrdered')
+                                price_col = column_mapping.get('Price') or column_mapping.get('UnitPrice')
+                                
+                                quantity = None
+                                if qty_col and qty_col in row:
+                                    try:
+                                        qty_val = str(row[qty_col]).replace('$', '').replace(',', '').strip()
+                                        quantity = float(qty_val) if qty_val else None
+                                    except (ValueError, TypeError):
+                                        quantity = None
+                                
+                                price = None
+                                if price_col and price_col in row:
+                                    try:
+                                        price_val = str(row[price_col]).replace('$', '').replace(',', '').strip()
+                                        price = float(price_val) if price_val else None
+                                    except (ValueError, TypeError):
+                                        price = None
+                                
+                                # Determine if product was found
+                                is_found = product_match and product_match.get('found')
+                                product_id = product_match.get('cin7_id') if product_match else (product_data.get('ID') if product_data else None)
+                                
+                                # Build line item
+                                line_item = {
+                                    'SKU': sku,
+                                    'ProductID': product_id,
+                                    'Quantity': quantity if quantity is not None else 0,
+                                    'Price': price if price is not None else 0,
+                                    '_not_found': not is_found,
+                                    '_error': f'Product SKU "{sku}" not found in Cin7' if not is_found else None
+                                }
+                                sale_order_payload_for_display['Lines'].append(line_item)
+            else:
+                sale_order_payload_for_display = sale_order_data
+        except Exception as e:
+            logger.warning(f"Error building sale_order_payload_for_display: {str(e)}")
+            # Fallback: create empty payload
+            sale_order_payload_for_display = {
+                'SaleID': '<SALE_ID_PLACEHOLDER>',
+                'Lines': []
+            }
+        
+        # Ensure order_data includes all available information
+        order_data.update({
+            'matching_details': matching_details,
+            'sale_payload': sale_payload_for_display,
+            'sale_order_payload': sale_order_payload_for_display,
+            'what_is_needed': what_is_needed if 'what_is_needed' in locals() else None,
+            'attempted_send': False
+        })
         
         order_result.status = 'failed'
         order_result.error_message = error_msg
-        order_result.error_type = categorize_error(error_msg)
+        # Set error_type to 'data_missing' if it's a customer/product not found error
+        if "TaxRule is required" in error_msg and 'matching_details' in locals() and not matching_details.get('customer', {}).get('found'):
+            order_result.error_type = 'data_missing'
+        elif "Customer" in error_msg and "not found" in error_msg:
+            order_result.error_type = 'data_missing'
+        else:
+            order_result.error_type = categorize_error(error_msg)
         order_result.order_data = order_data
+        # Only set sale_id if it was successfully created
+        if sale_id:
+            order_result.sale_id = sale_id
+        if sale_order_id:
+            order_result.sale_order_id = sale_order_id
         order_result.processed_at = datetime.utcnow()
         db.session.commit()
         
         return {
             'status': 'failed',
             'error_message': error_msg,
-            'order_data': order_data
+            'order_data': order_data,
+            'sale_id': str(sale_id) if sale_id else None,
+            'sale_order_id': str(sale_order_id) if sale_order_id else None
         }
 
 
@@ -1101,6 +2274,8 @@ def process_webhook_csv(
         default_mapping = default_mapping_obj.column_mapping or {}
     
     # Merge detected mappings with default mapping (default takes precedence)
+    # BUT: Always preserve SaleOrderNumber and InvoiceNumber from detection if not in default
+    # These are critical for order grouping
     column_mapping = {}
     # First, use detected mappings
     for cin7_field, matches in detected_mappings.items():
@@ -1110,6 +2285,15 @@ def process_webhook_csv(
     for cin7_field, csv_column in default_mapping.items():
         if csv_column:
             column_mapping[cin7_field] = csv_column
+    
+    # Critical: Ensure SaleOrderNumber or InvoiceNumber is present for order grouping
+    # If default mapping doesn't have it, use detected mapping
+    if 'SaleOrderNumber' not in column_mapping and 'InvoiceNumber' not in column_mapping:
+        # Try to get from detected mappings
+        if 'SaleOrderNumber' in detected_mappings and detected_mappings['SaleOrderNumber']:
+            column_mapping['SaleOrderNumber'] = detected_mappings['SaleOrderNumber'][0]
+        elif 'InvoiceNumber' in detected_mappings and detected_mappings['InvoiceNumber']:
+            column_mapping['InvoiceNumber'] = detected_mappings['InvoiceNumber'][0]
     
     if not column_mapping:
         return {
@@ -1125,9 +2309,12 @@ def process_webhook_csv(
         FROM information_schema.columns 
         WHERE table_schema = 'voyager' 
         AND table_name = 'client_erp_credentials' 
-        AND column_name IN ('customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set')
+            AND column_name IN ('customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products')
     """)
     existing_customer_cols = {row[0] for row in db.session.execute(check_customer_cols_query).fetchall()}
+    existing_product_cols = {
+        'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products'
+    } & existing_customer_cols  # Intersection to get only product columns that exist
     
     select_fields = [
         'cec.id',
@@ -1157,6 +2344,31 @@ def process_webhook_csv(
         select_fields.append('cec.customer_attribute_set')
     else:
         select_fields.append('NULL as customer_attribute_set')
+    
+    if 'product_costing_method' in existing_product_cols:
+        select_fields.append('cec.product_costing_method')
+    else:
+        select_fields.append('NULL as product_costing_method')
+    
+    if 'product_default_price_tier' in existing_product_cols:
+        select_fields.append('cec.product_default_price_tier')
+    else:
+        select_fields.append('NULL as product_default_price_tier')
+    
+    if 'product_default_price' in existing_product_cols:
+        select_fields.append('cec.product_default_price')
+    else:
+        select_fields.append('NULL as product_default_price')
+    
+    if 'product_currency' in existing_product_cols:
+        select_fields.append('cec.product_currency')
+    else:
+        select_fields.append('NULL as product_currency')
+    
+    if 'auto_create_customers_products' in existing_product_cols:
+        select_fields.append('cec.auto_create_customers_products')
+    else:
+        select_fields.append('false as auto_create_customers_products')
     
     query = text(f"""
         SELECT 
@@ -1192,6 +2404,26 @@ def process_webhook_csv(
     if 'customer_attribute_set' in existing_customer_cols and hasattr(cred_row, 'customer_attribute_set'):
         customer_attribute_set = cred_row.customer_attribute_set
     
+    # Extract product default fields
+    product_costing_method = None
+    product_default_price_tier = None
+    product_default_price = None
+    product_currency = None
+    
+    if 'product_costing_method' in existing_product_cols and hasattr(cred_row, 'product_costing_method'):
+        product_costing_method = cred_row.product_costing_method if cred_row.product_costing_method else None
+    if 'product_default_price_tier' in existing_product_cols and hasattr(cred_row, 'product_default_price_tier'):
+        product_default_price_tier = cred_row.product_default_price_tier if cred_row.product_default_price_tier else None
+    if 'product_default_price' in existing_product_cols and hasattr(cred_row, 'product_default_price'):
+        product_default_price = float(cred_row.product_default_price) if cred_row.product_default_price is not None else None
+    if 'product_currency' in existing_product_cols and hasattr(cred_row, 'product_currency'):
+        product_currency = cred_row.product_currency if cred_row.product_currency else None
+    
+    # Get auto_create_customers_products from credentials
+    auto_create_customers_products = False
+    if 'auto_create_customers_products' in existing_product_cols and hasattr(cred_row, 'auto_create_customers_products'):
+        auto_create_customers_products = bool(cred_row.auto_create_customers_products) if cred_row.auto_create_customers_products else False
+    
     # Get settings
     client_query = text("""
         SELECT client_id FROM voyager.client_erp_credentials
@@ -1217,7 +2449,12 @@ def process_webhook_csv(
             'customer_account_receivable': customer_account_receivable,
             'customer_revenue_account': customer_revenue_account,
             'customer_tax_rule': customer_tax_rule,
-            'customer_attribute_set': customer_attribute_set
+            'customer_attribute_set': customer_attribute_set,
+            'auto_create_customers_products': auto_create_customers_products,
+            'product_costing_method': product_costing_method or 'FIFO',
+            'product_default_price_tier': product_default_price_tier or 'Tier 1',
+            'product_default_price': product_default_price if product_default_price is not None else 0.0,
+            'product_currency': product_currency or 'USD'
         }
     else:
         settings = {
@@ -1231,7 +2468,12 @@ def process_webhook_csv(
             'customer_account_receivable': customer_account_receivable,
             'customer_revenue_account': customer_revenue_account,
             'customer_tax_rule': customer_tax_rule,
-            'customer_attribute_set': customer_attribute_set
+            'customer_attribute_set': customer_attribute_set,
+            'auto_create_customers_products': auto_create_customers_products,
+            'product_costing_method': product_costing_method or 'FIFO',
+            'product_default_price_tier': product_default_price_tier or 'Tier 1',
+            'product_default_price': product_default_price if product_default_price is not None else 0.0,
+            'product_currency': product_currency or 'USD'
         }
     
     # Create logging callback
@@ -1352,6 +2594,24 @@ def process_webhook_csv(
     # Group rows into orders
     validator = SalesOrderValidator(api_client)
     row_groups = validator._group_rows_by_order(rows, column_mapping)
+    logger.info(f"Grouped {len(rows)} rows into {len(row_groups)} order groups")
+    
+    if not row_groups:
+        logger.warning(f"No order groups found - this will result in 0 orders processed")
+        upload = SalesOrderUpload.query.get(upload_id)
+        if upload:
+            upload.status = 'failed'
+            upload.error_log = ['No valid order groups found - check column mapping for CustomerReference, InvoiceNumber, or SaleOrderNumber']
+            upload.completed_at = datetime.utcnow()
+            upload.total_rows = len(rows)
+            db.session.commit()
+            emit_upload_event('upload_status_changed', str(upload_id), str(upload.client_id) if upload.client_id else None)
+        return {
+            'successful': 0,
+            'failed': 0,
+            'total_orders': 0,
+            'error': 'No valid order groups found - check column mapping'
+        }
     
     # Preload customers and products from database cache for better performance
     try:
@@ -1372,7 +2632,509 @@ def process_webhook_csv(
         preloaded_products=getattr(validator, 'product_lookup', {})
     )
     
-    # Process each order
+    # PHASE 1: Auto-create ALL missing customers and products across ALL orders
+    # This ensures everything exists before we start creating orders
+    auto_create_customers_products = settings.get('auto_create_customers_products', False)
+    
+    if auto_create_customers_products:
+        logger.info("PHASE 1: Auto-creating all missing customers and products across all orders...")
+        
+        # Collect all unique customers and products from all orders
+        all_customers_needed = set()
+        all_products_needed = set()
+        customer_name_col = column_mapping.get('CustomerName', '')
+        sku_col = column_mapping.get('SKU') or column_mapping.get('ProductCode')
+        
+        for order_key, group_rows in row_groups.items():
+            for row_data in group_rows:
+                row = row_data['data']
+                
+                # Collect customer
+                if customer_name_col and customer_name_col in row:
+                    customer_name = str(row[customer_name_col]).strip() if row[customer_name_col] else None
+                    if customer_name:
+                        all_customers_needed.add(customer_name)
+                
+                # Collect products
+                if sku_col and sku_col in row:
+                    sku = str(row[sku_col]).strip() if row[sku_col] else None
+                    if sku:
+                        all_products_needed.add(sku)
+        
+        logger.info(f"Found {len(all_customers_needed)} unique customers and {len(all_products_needed)} unique products across all orders")
+        
+        # Auto-create all missing customers
+        auto_created_customer_ids = []
+        for customer_name in all_customers_needed:
+            # Check if customer already exists
+            customer = builder._lookup_customer_by_name(customer_name)
+            if not customer:
+                logger.info(f"Auto-creating customer '{customer_name}'...")
+                try:
+                    # Build customer payload
+                    customer_payload = {
+                        'Name': customer_name,
+                        'Status': 'Active',
+                        'Currency': settings.get('default_currency', 'USD'),
+                        'PaymentTerm': '30 days'
+                    }
+                    
+                    # Add required fields from settings
+                    if settings.get('customer_account_receivable'):
+                        customer_payload['AccountReceivable'] = settings['customer_account_receivable']
+                    if settings.get('customer_revenue_account'):
+                        customer_payload['RevenueAccount'] = settings['customer_revenue_account']
+                    
+                    # TaxRule - need to convert UUID to Name
+                    tax_rule_uuid = settings.get('customer_tax_rule')
+                    if tax_rule_uuid:
+                        try:
+                            tax_rules = api_client.get_tax_rules()
+                            for rule in tax_rules:
+                                if str(rule.get('ID')) == str(tax_rule_uuid):
+                                    customer_payload['TaxRule'] = rule.get('Name')
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Could not fetch tax rules: {e}")
+                    
+                    if settings.get('customer_attribute_set'):
+                        customer_payload['AttributeSet'] = settings['customer_attribute_set']
+                    
+                    # Create customer
+                    create_success, create_message, create_response = api_client.create_customer(customer_payload)
+                    
+                    if create_success and create_response:
+                        # Extract customer from response (may be wrapped in CustomerList)
+                        customer_data = None
+                        if isinstance(create_response, dict):
+                            if 'ID' in create_response:
+                                customer_data = create_response
+                            elif 'CustomerList' in create_response and isinstance(create_response['CustomerList'], list) and len(create_response['CustomerList']) > 0:
+                                customer_data = create_response['CustomerList'][0]
+                        
+                        if customer_data:
+                            customer_id = customer_data.get('ID')
+                            if customer_id:
+                                try:
+                                    customer_id_uuid = uuid.UUID(str(customer_id))
+                                    from routes.sales import refresh_single_customer_cache
+                                    refresh_single_customer_cache(credential_id_for_logging, customer_id_uuid, customer_data, is_new=True)
+                                    
+                                    # Update builder cache
+                                    customer_name_clean = customer_name.strip()
+                                    builder.preloaded_customers[customer_name_clean] = customer_data
+                                    builder.preloaded_customers[customer_name_clean.upper()] = customer_data
+                                    builder.preloaded_customers[customer_name_clean.lower()] = customer_data
+                                    
+                                    # Update customer cache
+                                    cache_key = f"{customer_name_clean}|None"
+                                    builder._customer_cache[cache_key] = customer_data
+                                    
+                                    auto_created_customer_ids.append(customer_id_uuid)
+                                    
+                                    # Create upload mapping for this customer
+                                    try:
+                                        customer_mapping = CustomerUploadMapping(
+                                            id=uuid.uuid4(),
+                                            client_erp_credentials_id=credential_id_for_logging,
+                                            cin7_customer_id=customer_id_uuid,
+                                            upload_id=upload_id,
+                                            order_ids=[]  # Will be populated when orders are created
+                                        )
+                                        db.session.add(customer_mapping)
+                                        logger.info(f"Created customer upload mapping for customer '{customer_name}' (ID: {customer_id})")
+                                    except Exception as mapping_error:
+                                        logger.warning(f"Failed to create customer upload mapping: {str(mapping_error)}")
+                                    
+                                    db.session.commit()
+                                    logger.info(f"✓ Auto-created customer '{customer_name}' with ID {customer_id}")
+                                except (ValueError, AttributeError) as e:
+                                    logger.error(f"Invalid customer ID format: {customer_id} - {str(e)}")
+                        else:
+                            logger.error(f"Customer created but response format unexpected: {create_response}")
+                    elif '409' in str(create_message) or 'already exists' in str(create_message).lower():
+                        # Customer already exists - look it up and cache it
+                        logger.info(f"Customer '{customer_name}' already exists, looking it up...")
+                        try:
+                            customers = api_client.search_customer(name=customer_name)
+                            if customers and len(customers) > 0:
+                                existing_customer = customers[0]
+                                customer_id = existing_customer.get('ID')
+                                if customer_id:
+                                    try:
+                                        customer_id_uuid = uuid.UUID(str(customer_id))
+                                        from routes.sales import refresh_single_customer_cache
+                                        refresh_single_customer_cache(credential_id_for_logging, customer_id_uuid, existing_customer, is_new=False)
+                                        
+                                        # Update builder cache
+                                        customer_name_clean = customer_name.strip()
+                                        builder.preloaded_customers[customer_name_clean] = existing_customer
+                                        builder.preloaded_customers[customer_name_clean.upper()] = existing_customer
+                                        builder.preloaded_customers[customer_name_clean.lower()] = existing_customer
+                                        cache_key = f"{customer_name_clean}|None"
+                                        builder._customer_cache[cache_key] = existing_customer
+                                        db.session.commit()
+                                        logger.info(f"✓ Found and cached existing customer '{customer_name}'")
+                                    except (ValueError, AttributeError) as e:
+                                        logger.error(f"Invalid customer ID format: {customer_id} - {str(e)}")
+                        except Exception as e:
+                            logger.error(f"Error looking up existing customer: {str(e)}", exc_info=True)
+                except Exception as e:
+                    logger.error(f"Error auto-creating customer '{customer_name}': {str(e)}", exc_info=True)
+        
+        # Auto-create all missing products
+        # First, collect product names from CSV rows
+        product_names_map = {}  # Map SKU to product name from CSV
+        product_name_col = column_mapping.get('ProductName') or column_mapping.get('Name') or column_mapping.get('Item Description')
+        
+        for order_key, group_rows in row_groups.items():
+            for row_data in group_rows:
+                row = row_data['data']
+                if sku_col and sku_col in row:
+                    sku = str(row[sku_col]).strip() if row[sku_col] else None
+                    if sku and sku not in product_names_map:
+                        # Try to get product name from CSV
+                        if product_name_col and product_name_col in row:
+                            product_name = str(row[product_name_col]).strip() if row[product_name_col] else None
+                            if product_name:
+                                product_names_map[sku] = product_name
+        
+        auto_created_product_ids = []
+        for sku in all_products_needed:
+            # Always attempt to create products in Phase 1
+            # The API will return 409 if they already exist, which we handle below
+            # This ensures new products are created and flagged correctly
+            logger.info(f"Auto-creating product with SKU '{sku}'...")
+            
+            # #region agent log
+            import json
+            existing_before = CachedProduct.query.filter_by(
+                client_erp_credentials_id=credential_id_for_logging,
+                sku=sku
+            ).first()
+            with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H2","location":"routes/webhooks.py:2268","message":"Before product creation attempt","data":{"sku":sku,"exists_in_cache":existing_before is not None,"existing_is_new":existing_before.is_new if existing_before else None,"existing_created_via_auto_create":existing_before.created_via_auto_create if existing_before else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            # #endregion
+            
+            try:
+                # Get product name from map or use SKU
+                product_name = product_names_map.get(sku, sku)
+                
+                # Build product payload
+                product_payload = {
+                    'Name': product_name,
+                    'SKU': sku,
+                    'Status': 'Active',
+                    'Type': 'Stock',
+                    'CostingMethod': settings.get('product_costing_method', 'FIFO'),
+                    'PriceTiers': {
+                        settings.get('product_default_price_tier', 'Tier 1'): settings.get('product_default_price', 0.0)
+                    }
+                }
+                
+                # Create product
+                create_success, create_message, create_response = api_client.create_product(product_payload)
+                
+                # #region agent log
+                import json
+                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H5","location":"routes/webhooks.py:2298","message":"Product creation API call result","data":{"sku":sku,"create_success":create_success,"create_message":str(create_message)[:200] if create_message else None,"has_response":create_response is not None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                # #endregion
+                
+                if create_success and create_response:
+                    # Extract product from response (may be wrapped in ProductList)
+                    # Match the customer pattern exactly
+                    product_data = None
+                    if isinstance(create_response, dict):
+                        if 'ID' in create_response:
+                            product_data = create_response
+                        elif 'ProductList' in create_response and isinstance(create_response['ProductList'], list) and len(create_response['ProductList']) > 0:
+                            product_data = create_response['ProductList'][0]
+                    
+                    # #region agent log
+                    with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run2","hypothesisId":"H1","location":"routes/webhooks.py:2315","message":"After product_data extraction","data":{"sku":sku,"product_data_is_none":product_data is None,"has_id":product_data.get('ID') if product_data else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    # #endregion
+                    
+                    if product_data:
+                        product_id = product_data.get('ID')
+                        if product_id:
+                            try:
+                                product_id_uuid = uuid.UUID(str(product_id))
+                                from routes.sales import refresh_single_product_cache
+                                
+                                # #region agent log
+                                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
+                                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run2","hypothesisId":"H1","location":"routes/webhooks.py:2321","message":"About to call refresh_single_product_cache with is_new=True","data":{"sku":sku,"product_id":str(product_id_uuid)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                                # #endregion
+                                
+                                logger.info(f"Calling refresh_single_product_cache for SKU '{sku}' with is_new=True (main path)")
+                                refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, product_data, is_new=True)
+                                
+                                # Update builder cache
+                                sku_clean = sku.strip()
+                                builder.preloaded_products[sku_clean] = product_data
+                                builder.preloaded_products[sku_clean.upper()] = product_data
+                                builder.preloaded_products[sku_clean.lower()] = product_data
+                                builder._product_cache[sku_clean] = product_data
+                                
+                                auto_created_product_ids.append(product_id_uuid)
+                                
+                                # Create upload mapping for this product
+                                try:
+                                    product_mapping = ProductUploadMapping(
+                                        id=uuid.uuid4(),
+                                        client_erp_credentials_id=credential_id_for_logging,
+                                        cin7_product_id=product_id_uuid,
+                                        upload_id=upload_id,
+                                        order_ids=[]  # Will be populated when orders are created
+                                    )
+                                    db.session.add(product_mapping)
+                                    logger.info(f"Created product upload mapping for SKU '{sku}' (ID: {product_id})")
+                                except Exception as mapping_error:
+                                    logger.warning(f"Failed to create product upload mapping: {str(mapping_error)}")
+                                
+                                db.session.commit()
+                                logger.info(f"✓ Auto-created product SKU '{sku}' with ID {product_id} and set flags")
+                            except (ValueError, AttributeError) as e:
+                                logger.error(f"Invalid product ID format: {product_id} - {str(e)}")
+                            except Exception as e:
+                                logger.error(f"Error refreshing product cache for SKU '{sku}': {str(e)}", exc_info=True)
+                    else:
+                        logger.error(f"Product created but response format unexpected: {create_response}")
+                        # Try to extract product ID from response even if format is unexpected
+                        # Sometimes the API returns the product directly without wrapping
+                        if create_response and not isinstance(create_response, dict):
+                            logger.warning(f"create_response is not a dict: {type(create_response)}")
+                        elif create_response and isinstance(create_response, dict):
+                            # Log all keys to help debug
+                            logger.warning(f"create_response keys: {list(create_response.keys())}")
+                            # Try to find product data in any key
+                            for key, value in create_response.items():
+                                if isinstance(value, dict) and 'ID' in value:
+                                    product_data = value
+                                    logger.info(f"Found product data in key '{key}'")
+                                    break
+                                elif isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict) and 'ID' in value[0]:
+                                    product_data = value[0]
+                                    logger.info(f"Found product data in list at key '{key}'")
+                                    break
+                        
+                        # If we found product_data, process it
+                        if product_data:
+                            product_id = product_data.get('ID')
+                            if product_id:
+                                try:
+                                    product_id_uuid = uuid.UUID(str(product_id))
+                                    from routes.sales import refresh_single_product_cache
+                                    logger.info(f"Calling refresh_single_product_cache for SKU '{sku}' with is_new=True (fallback path)")
+                                    refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, product_data, is_new=True)
+                                    
+                                    # Update builder cache
+                                    sku_clean = sku.strip()
+                                    builder.preloaded_products[sku_clean] = product_data
+                                    builder.preloaded_products[sku_clean.upper()] = product_data
+                                    builder.preloaded_products[sku_clean.lower()] = product_data
+                                    builder._product_cache[sku_clean] = product_data
+                                    
+                                    auto_created_product_ids.append(product_id_uuid)
+                                    
+                                    # Create upload mapping for this product
+                                    try:
+                                        product_mapping = ProductUploadMapping(
+                                            id=uuid.uuid4(),
+                                            client_erp_credentials_id=credential_id_for_logging,
+                                            cin7_product_id=product_id_uuid,
+                                            upload_id=upload_id,
+                                            order_ids=[]  # Will be populated when orders are created
+                                        )
+                                        db.session.add(product_mapping)
+                                        logger.info(f"Created product upload mapping for SKU '{sku}' (ID: {product_id}) - fallback path")
+                                    except Exception as mapping_error:
+                                        logger.warning(f"Failed to create product upload mapping: {str(mapping_error)}")
+                                    
+                                    db.session.commit()
+                                    logger.info(f"✓ Auto-created product SKU '{sku}' with ID {product_id} and set flags (fallback)")
+                                except (ValueError, AttributeError) as e:
+                                    logger.error(f"Invalid product ID format: {product_id} - {str(e)}")
+                                except Exception as e:
+                                    logger.error(f"Error refreshing product cache for SKU '{sku}': {str(e)}", exc_info=True)
+                elif '409' in str(create_message) or 'already exists' in str(create_message).lower():
+                    # Product already exists - look it up and cache it
+                    logger.info(f"Product SKU '{sku}' already exists in Cin7, looking it up...")
+                    try:
+                        products = api_client.search_product(sku=sku)
+                        if products and len(products) > 0:
+                            existing_product = products[0]
+                            product_id = existing_product.get('ID')
+                            if product_id:
+                                try:
+                                    product_id_uuid = uuid.UUID(str(product_id))
+                                    from routes.sales import refresh_single_product_cache
+                                    refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, existing_product, is_new=False)
+                                    
+                                    # Update builder cache
+                                    sku_clean = sku.strip()
+                                    builder.preloaded_products[sku_clean] = existing_product
+                                    builder.preloaded_products[sku_clean.upper()] = existing_product
+                                    builder.preloaded_products[sku_clean.lower()] = existing_product
+                                    builder._product_cache[sku_clean] = existing_product
+                                    db.session.commit()
+                                    logger.info(f"✓ Found and cached existing product SKU '{sku}'")
+                                except (ValueError, AttributeError) as e:
+                                    logger.error(f"Invalid product ID format: {product_id} - {str(e)}")
+                    except Exception as e:
+                        logger.error(f"Error looking up existing product: {str(e)}", exc_info=True)
+            except Exception as e:
+                logger.error(f"Error auto-creating product SKU '{sku}': {str(e)}", exc_info=True)
+                # Product found in cache - check if it was auto-created in this run
+                # If it's in the cache from preload, it might have been created in a previous run
+                # We should still try to create it (API will return 409 if it exists), or check if flags need to be set
+                logger.info(f"Product SKU '{sku}' found in cache, but checking if it needs to be created or flags need to be set...")
+                # Check if product exists in database cache and has flags set
+                cached_product = CachedProduct.query.filter_by(
+                    client_erp_credentials_id=credential_id_for_logging,
+                    sku=sku
+                ).first()
+                
+                if cached_product:
+                    # Product exists in database cache
+                    if not cached_product.is_new and not cached_product.created_via_auto_create:
+                        # Product exists but wasn't auto-created - try to create it anyway
+                        # The API will return 409 if it already exists, which we'll handle
+                        logger.info(f"Product SKU '{sku}' exists in cache but wasn't auto-created - attempting to create (will get 409 if exists)...")
+                        try:
+                            product_name = product_names_map.get(sku, sku)
+                            product_payload = {
+                                'Name': product_name,
+                                'SKU': sku,
+                                'Status': 'Active',
+                                'Type': 'Stock',
+                                'CostingMethod': settings.get('product_costing_method', 'FIFO'),
+                                'PriceTiers': {
+                                    settings.get('product_default_price_tier', 'Tier 1'): settings.get('product_default_price', 0.0)
+                                }
+                            }
+                            
+                            create_success, create_message, create_response = api_client.create_product(product_payload)
+                            
+                            if create_success and create_response:
+                                # Product was created (or returned if already exists)
+                                product_data = None
+                                if isinstance(create_response, dict):
+                                    if 'ID' in create_response:
+                                        product_data = create_response
+                                    elif 'ProductList' in create_response and isinstance(create_response['ProductList'], list) and len(create_response['ProductList']) > 0:
+                                        product_data = create_response['ProductList'][0]
+                                
+                                if product_data:
+                                    product_id = product_data.get('ID')
+                                    if product_id:
+                                        try:
+                                            product_id_uuid = uuid.UUID(str(product_id))
+                                            from routes.sales import refresh_single_product_cache
+                                            # Always set is_new=True for products created in this path (they're being auto-created)
+                                            # This matches the customer pattern - if we're creating it, it's new
+                                            refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, product_data, is_new=True)
+                                            
+                                            # Update builder cache
+                                            sku_clean = sku.strip()
+                                            builder.preloaded_products[sku_clean] = product_data
+                                            builder.preloaded_products[sku_clean.upper()] = product_data
+                                            builder.preloaded_products[sku_clean.lower()] = product_data
+                                            builder._product_cache[sku_clean] = product_data
+                                            
+                                            auto_created_product_ids.append(product_id_uuid)
+                                            db.session.commit()
+                                            logger.info(f"✓ Auto-created product SKU '{sku}' with ID {product_id} and set flags")
+                                        except Exception as e:
+                                            logger.error(f"Error processing product SKU '{sku}': {str(e)}", exc_info=True)
+                            elif '409' in str(create_message) or 'already exists' in str(create_message).lower():
+                                # Product already exists - just refresh cache, don't set flags
+                                logger.debug(f"Product SKU '{sku}' already exists in Cin7, cache is up to date")
+                        except Exception as e:
+                            logger.error(f"Error checking/creating product SKU '{sku}': {str(e)}", exc_info=True)
+                    else:
+                        logger.debug(f"Product SKU '{sku}' already in cache with flags set (is_new={cached_product.is_new}, created_via_auto_create={cached_product.created_via_auto_create})")
+                else:
+                    logger.debug(f"Product SKU '{sku}' found in builder cache but not in database cache - this shouldn't happen")
+        
+        # Final cache refresh from database to ensure everything is available
+        logger.info("Refreshing cache from database after auto-creation...")
+        db.session.commit()
+        
+        # Refresh ALL customers from database to ensure everything is in builder's cache
+        # This ensures all customers needed for orders are available
+        logger.info(f"Refreshing all needed customers from database cache...")
+        # Load all cached customers for this client once
+        all_cached_customers = CachedCustomer.query.filter_by(
+            client_erp_credentials_id=credential_id_for_logging
+        ).all()
+        
+        # Build a lookup map by customer name
+        customer_cache_map = {}
+        for cached_customer in all_cached_customers:
+            if cached_customer.customer_data:
+                import json
+                cust_data = json.loads(cached_customer.customer_data) if isinstance(cached_customer.customer_data, str) else cached_customer.customer_data
+                customer_name_from_data = cust_data.get('Name', '').strip()
+                if customer_name_from_data:
+                    # Ensure customer_data has 'ID' field set
+                    if 'ID' not in cust_data or not cust_data.get('ID'):
+                        cust_data['ID'] = str(cached_customer.cin7_customer_id)
+                    customer_cache_map[customer_name_from_data] = cust_data
+        
+        # Refresh each needed customer from the map
+        for customer_name in all_customers_needed:
+            customer_name_clean = customer_name.strip()
+            customer_data = customer_cache_map.get(customer_name_clean)
+            
+            if customer_data:
+                builder.preloaded_customers[customer_name_clean] = customer_data
+                builder.preloaded_customers[customer_name_clean.upper()] = customer_data
+                builder.preloaded_customers[customer_name_clean.lower()] = customer_data
+                cache_key = f"{customer_name_clean}|None"
+                builder._customer_cache[cache_key] = customer_data
+                logger.debug(f"Refreshed customer '{customer_name}' from database cache (ID: {customer_data.get('ID')})")
+        
+        # Refresh ALL products from database to ensure everything is in builder's cache
+        # This ensures all products needed for orders are available
+        # IMPORTANT: This refresh does NOT modify the flags - flags are preserved from auto-creation
+        logger.info(f"Refreshing all needed products from database cache...")
+        for sku in all_products_needed:
+            # Find the product in database cache by SKU
+            cached_product = CachedProduct.query.filter_by(
+                client_erp_credentials_id=credential_id_for_logging,
+                sku=sku
+            ).first()
+            
+            if cached_product and cached_product.product_data:
+                import json
+                product_data = json.loads(cached_product.product_data) if isinstance(cached_product.product_data, str) else cached_product.product_data
+                
+                # Ensure product_data has 'ID' field set (use cin7_product_id from cache)
+                if 'ID' not in product_data or not product_data.get('ID'):
+                    product_data['ID'] = str(cached_product.cin7_product_id)
+                
+                # Log flag status for debugging
+                if cached_product.is_new or cached_product.created_via_auto_create:
+                    logger.debug(f"Refreshed product SKU '{sku}' from database cache (ID: {cached_product.cin7_product_id}) - flags: is_new={cached_product.is_new}, created_via_auto_create={cached_product.created_via_auto_create}")
+                else:
+                    logger.debug(f"Refreshed product SKU '{sku}' from database cache (ID: {cached_product.cin7_product_id}) - not flagged as new")
+                
+                sku_clean = sku.strip()
+                builder.preloaded_products[sku_clean] = product_data
+                builder.preloaded_products[sku_clean.upper()] = product_data
+                builder.preloaded_products[sku_clean.lower()] = product_data
+                builder._product_cache[sku_clean] = product_data
+                
+                # IMPORTANT: Do NOT modify cached_product here - flags are already set correctly from auto-creation
+                # We're just loading product_data into builder's cache, not modifying the database record
+        
+        logger.info(f"PHASE 1 complete: Auto-created {len(auto_created_customer_ids)} customers and {len(auto_created_product_ids)} products")
+        logger.info("PHASE 2: Starting order creation...")
+    
+    # PHASE 2: Process each order (all customers/products should now exist)
     successful_count = 0
     failed_count = 0
     
@@ -1583,6 +3345,7 @@ def receive_email_webhook():
                 logger.info(f"Starting background processing for upload {upload_id}")
                 # Create new database session for background thread
                 from app import create_app
+                from database import db  # Import db once at function level
                 app = create_app('production' if os.environ.get('FLASK_ENV') == 'production' else 'development')
                 with app.app_context():
                     try:
@@ -1648,7 +3411,8 @@ def receive_email_webhook():
                 # Dispose of the engine to close all connections from this app instance
                 if app and hasattr(app, 'extensions') and 'sqlalchemy' in app.extensions:
                     try:
-                        db.engine.dispose()
+                        with app.app_context():
+                            db.engine.dispose()
                         logger.debug(f"Disposed database engine for background thread {upload_id}")
                     except Exception as dispose_error:
                         logger.warning(f"Error disposing database engine: {str(dispose_error)}")
@@ -1840,6 +3604,7 @@ def manual_upload():
                 logger.info(f"Starting background processing for manual upload {upload_id}")
                 # Create new database session for background thread
                 from app import create_app
+                from database import db  # Import db once at function level
                 app = create_app('production' if os.environ.get('FLASK_ENV') == 'production' else 'development')
                 with app.app_context():
                     try:
@@ -1907,7 +3672,8 @@ def manual_upload():
                 # Dispose of the engine to close all connections from this app instance
                 if app and hasattr(app, 'extensions') and 'sqlalchemy' in app.extensions:
                     try:
-                        db.engine.dispose()
+                        with app.app_context():
+                            db.engine.dispose()
                         logger.debug(f"Disposed database engine for background thread {upload_id}")
                     except Exception as dispose_error:
                         logger.warning(f"Error disposing database engine: {str(dispose_error)}")
@@ -2188,23 +3954,197 @@ def get_order_api_logs(order_result_id):
         if not upload:
             return jsonify({'error': 'Upload not found'}), 404
         
-        # Get API logs for this specific order (filter by order_id if available)
+        # Get API logs for this upload
+        # Include both:
+        # 1. Logs for this specific order (order_id = order_result_uuid)
+        # 2. Phase 1 logs (order_id = None) for product/customer creation that happen before orders
+        #    BUT only the ones related to this specific order (using mapping tables)
         logger.info(f"Fetching API logs for order {order_result_id}, upload_id: {order_result.upload_id}")
         
-        # First try to get logs filtered by order_id
-        logs_query = Cin7ApiLog.query.filter_by(order_id=order_result_uuid)
+        # Use mapping tables to find which customers/products are related to this order
+        related_customer_ids = set()
+        related_product_ids = set()
         
-        # If no logs found with order_id, fall back to upload_id (for backward compatibility)
-        logs_count = logs_query.count()
-        if logs_count == 0:
-            logger.info(f"No logs found with order_id, falling back to upload_id filter")
-            logs_query = Cin7ApiLog.query.filter_by(upload_id=order_result.upload_id)
+        # Get customer IDs from mapping table
+        customer_mappings = CustomerUploadMapping.query.filter_by(
+            upload_id=order_result.upload_id
+        ).all()
+        for mapping in customer_mappings:
+            if mapping.order_ids and str(order_result_uuid) in [str(oid) for oid in mapping.order_ids]:
+                related_customer_ids.add(str(mapping.cin7_customer_id))
+        
+        # Get product IDs from mapping table
+        product_mappings = ProductUploadMapping.query.filter_by(
+            upload_id=order_result.upload_id
+        ).all()
+        for mapping in product_mappings:
+            if mapping.order_ids and str(order_result_uuid) in [str(oid) for oid in mapping.order_ids]:
+                related_product_ids.add(str(mapping.cin7_product_id))
+        
+        # Extract customer name and product SKUs from order_data for matching POST request bodies
+        order_customer_name = None
+        order_product_skus = set()
+        
+        # Fallback: If mapping tables don't have order_ids yet, extract from order_data
+        if not related_customer_ids or not related_product_ids:
+            if order_result.order_data:
+                order_data = order_result.order_data
+                # Try to get customer ID from sale_payload or order_data
+                sale_payload = order_data.get('sale_payload') or {}
+                if isinstance(sale_payload, dict) and sale_payload.get('Customer'):
+                    related_customer_ids.add(str(sale_payload.get('Customer')))
+                elif isinstance(order_data, dict) and order_data.get('Customer'):
+                    related_customer_ids.add(str(order_data.get('Customer')))
+                
+                # Try to get product IDs from sale_order_payload
+                sale_order_payload = order_data.get('sale_order_payload') or {}
+                if isinstance(sale_order_payload, dict):
+                    lines = sale_order_payload.get('Lines', [])
+                    for line in lines:
+                        if isinstance(line, dict) and 'ProductID' in line:
+                            related_product_ids.add(str(line['ProductID']))
+        
+        # Extract customer name and product SKUs from matching_details for request body matching
+        if order_result.order_data:
+            order_data = order_result.order_data
+            matching_details = order_data.get('matching_details') or {}
+            
+            # Get customer name
+            customer_info = matching_details.get('customer') or {}
+            if isinstance(customer_info, dict):
+                order_customer_name = customer_info.get('name') or customer_info.get('customer_name')
+            if not order_customer_name and isinstance(order_data, dict):
+                order_customer_name = order_data.get('customer_name') or order_data.get('customername')
+            
+            # Get product SKUs
+            products = matching_details.get('products') or []
+            if isinstance(products, list):
+                for product in products:
+                    if isinstance(product, dict):
+                        sku = product.get('sku')
+                        if sku:
+                            order_product_skus.add(str(sku))
+        
+        logger.info(f"Order uses customer_ids: {list(related_customer_ids)}, product_ids: {list(related_product_ids)}")
+        logger.info(f"Order uses customer_name: {order_customer_name}, product_skus: {list(order_product_skus)}")
+        
+        from sqlalchemy import or_
+        # Get all logs for this upload
+        all_logs_query = Cin7ApiLog.query.filter(
+            Cin7ApiLog.upload_id == order_result.upload_id
+        ).filter(
+            or_(
+                Cin7ApiLog.order_id == order_result_uuid,  # Logs for this specific order
+                Cin7ApiLog.order_id.is_(None)  # Phase 1 logs (product/customer creation)
+            )
+        )
         
         # Order by creation time (oldest first to see the sequence)
-        logs_query = logs_query.order_by(Cin7ApiLog.created_at.asc())
+        all_logs_query = all_logs_query.order_by(Cin7ApiLog.created_at.asc())
+        all_logs = all_logs_query.all()
         
-        logs = logs_query.all()
-        logger.info(f"Found {len(logs)} API logs for upload_id {order_result.upload_id}")
+        # Filter Phase 1 logs to only include those related to this order
+        filtered_logs = []
+        for log in all_logs:
+            # Always include logs for this specific order (except /ref/tax which is not relevant)
+            if log.order_id == order_result_uuid:
+                # Filter out /ref/tax calls - they're not relevant to order creation
+                if log.endpoint != '/ref/tax':
+                    filtered_logs.append(log)
+            # For Phase 1 logs (order_id=None), filter by customer/product using mapping tables
+            elif log.order_id is None:
+                # Filter out /ref/tax calls - they're not relevant to order creation
+                if log.endpoint == '/ref/tax':
+                    continue
+                
+                # Check if this is a POST customer/product call related to this order
+                is_related = False
+                
+                if log.method == 'POST' and log.endpoint == '/customer':
+                    # First try to match by customer ID in response
+                    if related_customer_ids and log.response_body:
+                        try:
+                            import json
+                            response = log.response_body
+                            if isinstance(response, str):
+                                response = json.loads(response)
+                            
+                            # Extract customer ID from response
+                            customer_id_in_response = None
+                            if isinstance(response, dict):
+                                if 'ID' in response:
+                                    customer_id_in_response = str(response['ID'])
+                                elif 'CustomerList' in response and isinstance(response['CustomerList'], list) and len(response['CustomerList']) > 0:
+                                    customer_id_in_response = str(response['CustomerList'][0].get('ID', ''))
+                            
+                            if customer_id_in_response and customer_id_in_response.lower() in [cid.lower() for cid in related_customer_ids]:
+                                is_related = True
+                        except Exception as e:
+                            logger.debug(f"Error checking customer ID in response: {str(e)}")
+                    
+                    # Fallback: Match by customer name in request body
+                    if not is_related and order_customer_name and log.request_body:
+                        try:
+                            import json
+                            request = log.request_body
+                            if isinstance(request, str):
+                                request = json.loads(request)
+                            
+                            # Check if request body contains the customer name
+                            if isinstance(request, dict):
+                                request_name = request.get('Name') or request.get('name')
+                                if request_name and str(request_name).strip().lower() == str(order_customer_name).strip().lower():
+                                    is_related = True
+                        except Exception as e:
+                            logger.debug(f"Error checking customer name in request: {str(e)}")
+                
+                elif log.method == 'POST' and log.endpoint == '/product':
+                    # First try to match by product ID in response
+                    if related_product_ids and log.response_body:
+                        try:
+                            import json
+                            response = log.response_body
+                            if isinstance(response, str):
+                                response = json.loads(response)
+                            
+                            # Extract product ID from response
+                            product_id_in_response = None
+                            if isinstance(response, dict):
+                                if 'ID' in response:
+                                    product_id_in_response = str(response['ID'])
+                                elif 'ProductList' in response and isinstance(response['ProductList'], list) and len(response['ProductList']) > 0:
+                                    product_id_in_response = str(response['ProductList'][0].get('ID', ''))
+                            
+                            if product_id_in_response and product_id_in_response.lower() in [pid.lower() for pid in related_product_ids]:
+                                is_related = True
+                        except Exception as e:
+                            logger.debug(f"Error checking product ID in response: {str(e)}")
+                    
+                    # Fallback: Match by SKU in request body
+                    if not is_related and order_product_skus and log.request_body:
+                        try:
+                            import json
+                            request = log.request_body
+                            if isinstance(request, str):
+                                request = json.loads(request)
+                            
+                            # Check if request body contains any of the product SKUs
+                            if isinstance(request, dict):
+                                request_sku = request.get('SKU') or request.get('sku')
+                                if request_sku and str(request_sku).strip().lower() in [sku.lower() for sku in order_product_skus]:
+                                    is_related = True
+                        except Exception as e:
+                            logger.debug(f"Error checking product SKU in request: {str(e)}")
+                
+                # Include other Phase 1 logs (GET requests, etc.) but filter out unrelated POST customer/product calls
+                if log.method != 'POST' or (log.endpoint not in ['/customer', '/product']):
+                    is_related = True  # Include non-POST or non-customer/product POST calls
+                
+                if is_related:
+                    filtered_logs.append(log)
+        
+        logs = filtered_logs
+        logger.info(f"Found {len(logs)} API logs for upload_id {order_result.upload_id} (filtered to show only logs related to this order, excluding /ref/tax)")
         
         # Format response
         logs_data = []
@@ -2475,7 +4415,9 @@ def resolve_order(order_id):
         if not order_result:
             return jsonify({'error': 'Order not found'}), 404
         
-        if order_result.status == 'success':
+        # Allow resolving partial_success orders even though they have status='success'
+        # They appear in the failed orders tab and should be resolvable
+        if order_result.status == 'success' and order_result.error_type != 'partial_success':
             return jsonify({'error': 'Order already succeeded'}), 400
         
         data = request.get_json() or {}
@@ -2522,6 +4464,48 @@ def resolve_order(order_id):
         return jsonify({'error': 'Invalid order ID format'}), 400
     except Exception as e:
         logger.error(f"Error resolving order: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+
+
+@webhooks_bp.route('/orders/<order_id>/notes', methods=['POST'])
+@jwt_required()
+def add_order_notes(order_id):
+    """
+    Add notes to an order without marking it as resolved.
+    This allows adding notes to orders that are still being reviewed.
+    """
+    try:
+        order_result = SalesOrderResult.query.get(uuid.UUID(order_id))
+        if not order_result:
+            return jsonify({'error': 'Order not found'}), 404
+        
+        data = request.get_json() or {}
+        review_notes = data.get('review_notes', '').strip() if data.get('review_notes') else ''
+        
+        if not review_notes:
+            return jsonify({'error': 'Notes are required'}), 400
+        
+        # Add notes without resolving
+        order_result.review_notes = review_notes
+        
+        # Also store in order_data for backward compatibility
+        if not order_result.order_data:
+            order_result.order_data = {}
+        order_result.order_data['resolution_reason'] = review_notes
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Notes added successfully',
+            'review_notes': order_result.review_notes
+        }), 200
+    
+    except ValueError:
+        return jsonify({'error': 'Invalid order ID format'}), 400
+    except Exception as e:
+        logger.error(f"Error adding notes to order: {str(e)}", exc_info=True)
+        db.session.rollback()
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 

@@ -80,6 +80,8 @@ def get_settings(client_id):
             'default_delay_between_orders': 0.7,
             'default_batch_size': 50,
             'default_batch_delay': 45.0,
+            'auto_create_customers': False,
+            'auto_create_products': False,
             'created_at': None,
             'updated_at': None
         }), 200
@@ -158,6 +160,10 @@ def set_settings(client_id):
             settings.default_batch_size = int(data['default_batch_size'])
         if 'default_batch_delay' in data:
             settings.default_batch_delay = float(data['default_batch_delay'])
+        if 'auto_create_customers' in data:
+            settings.auto_create_customers = bool(data['auto_create_customers'])
+        if 'auto_create_products' in data:
+            settings.auto_create_products = bool(data['auto_create_products'])
         
         settings.updated_at = db.func.now()
     else:
@@ -176,7 +182,9 @@ def set_settings(client_id):
             date_format=data.get('date_format', 'YYYY-MM-DD'),
             default_delay_between_orders=data.get('default_delay_between_orders', 0.7),
             default_batch_size=data.get('default_batch_size', 50),
-            default_batch_delay=data.get('default_batch_delay', 45.0)
+            default_batch_delay=data.get('default_batch_delay', 45.0),
+            auto_create_customers=data.get('auto_create_customers', False),
+            auto_create_products=data.get('auto_create_products', False)
         )
         db.session.add(settings)
     
@@ -197,6 +205,8 @@ def set_settings(client_id):
         'default_delay_between_orders': settings.default_delay_between_orders,
         'default_batch_size': settings.default_batch_size,
         'default_batch_delay': settings.default_batch_delay,
+        'auto_create_customers': settings.auto_create_customers,
+        'auto_create_products': settings.auto_create_products,
         'created_at': settings.created_at.isoformat() if settings.created_at else None,
         'updated_at': settings.updated_at.isoformat() if settings.updated_at else None
     }), 201 if not settings.id else 200
@@ -234,6 +244,8 @@ def reset_settings(client_id):
         settings.default_delay_between_orders = 0.7
         settings.default_batch_size = 50
         settings.default_batch_delay = 45.0
+        settings.auto_create_customers = False
+        settings.auto_create_products = False
         settings.updated_at = db.func.now()
         db.session.commit()
     else:
@@ -255,6 +267,8 @@ def reset_settings(client_id):
         'default_delay_between_orders': settings.default_delay_between_orders,
         'default_batch_size': settings.default_batch_size,
         'default_batch_delay': settings.default_batch_delay,
+        'auto_create_customers': settings.auto_create_customers,
+        'auto_create_products': settings.auto_create_products,
         'message': 'Settings reset to defaults'
     }), 200
 

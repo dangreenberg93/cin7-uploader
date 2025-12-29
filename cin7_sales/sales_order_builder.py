@@ -349,6 +349,10 @@ class SalesOrderBuilder:
             row_lines = self._build_lines(row_data, column_mapping)
             all_lines.extend(row_lines)
         
+        # Ensure we have at least one line (required by API)
+        if not all_lines:
+            raise ValueError("No valid line items could be built - all products may be missing ProductID")
+        
         sale_order['Lines'] = all_lines
         
         # Calculate Total from lines (sum of all line totals)
@@ -696,8 +700,9 @@ class SalesOrderBuilder:
                             raise ValueError("TaxRule is required but not found in customer, sale, or client credentials settings. Please set 'tax_rule' in Cin7 credentials settings or ensure customer has TaxRule configured.")
                         line['TaxRule'] = str(tax_rule)  # TaxRule is the name (text), not a UUID
                         
-                        # Add line if SKU is present (Price can be 0 or missing, we'll still show the line)
-                        if line.get('SKU'):
+                        # Add line only if SKU is present AND ProductID is set (ProductID is required by API)
+                        # If product wasn't found during lookup, ProductID won't be set and we skip this line
+                        if line.get('SKU') and line.get('ProductID'):
                             # If Price is missing, set it to 0 so the line still appears
                             if 'Price' not in line or not line.get('Price'):
                                 line['Price'] = 0.0
@@ -712,6 +717,13 @@ class SalesOrderBuilder:
                             line['Total'] = (quantity * price) - discount
                             
                             lines.append(line)
+                        elif line.get('SKU') and not line.get('ProductID'):
+                            # Product was not found - this is an error condition
+                            # Log it but don't add the line (will cause empty lines error)
+                            # This should not happen if auto-create worked correctly
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.error(f"Product with SKU '{line.get('SKU')}' not found when building sale order lines - cache may not be updated correctly")
         
         return lines
     

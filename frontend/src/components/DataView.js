@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useClient } from '../contexts/ClientContext';
 import { useConnection } from '../contexts/ConnectionContext';
 import { useActivityLog } from '../contexts/ActivityLogContext';
@@ -11,9 +12,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableFoo
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Checkbox } from './ui/checkbox';
-import { Search, RefreshCw, Loader2, Columns, Download } from 'lucide-react';
+import { Search, RefreshCw, Loader2, Columns, Download, CheckCircle2, Circle, Check } from 'lucide-react';
+import { Badge } from './ui/badge';
 
 const DataView = () => {
+  const location = useLocation();
   const { selectedClientId } = useClient();
   const { setConnected, setCredentials, setTestConnection } = useConnection();
   const { addTerminalLine } = useActivityLog();
@@ -24,12 +27,16 @@ const DataView = () => {
   const [customersLoading, setCustomersLoading] = useState(false);
   const [customersSearch, setCustomersSearch] = useState('');
   const [customersLastUpdated, setCustomersLastUpdated] = useState(null);
+  const [customersFilter, setCustomersFilter] = useState('all'); // 'all' or 'new'
+  const [newCustomersCount, setNewCustomersCount] = useState(0);
   
   // Products state
   const [products, setProducts] = useState([]);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productsSearch, setProductsSearch] = useState('');
   const [productsLastUpdated, setProductsLastUpdated] = useState(null);
+  const [productsFilter, setProductsFilter] = useState('all'); // 'all' or 'new'
+  const [newProductsCount, setNewProductsCount] = useState(0);
   
   // Column visibility state
   const [visibleCustomerColumns, setVisibleCustomerColumns] = useState(new Set());
@@ -38,6 +45,8 @@ const DataView = () => {
   
   const prevClientIdRef = useRef(selectedClientId);
   const prevTabRef = useRef(activeTab);
+  const prevCustomersFilterRef = useRef('all');
+  const prevProductsFilterRef = useRef('all');
   const [refreshingCache, setRefreshingCache] = useState(false);
   const customersTabContentRef = useRef(null);
   
@@ -104,26 +113,34 @@ const DataView = () => {
     setTestConnection(() => testConnection);
   }, [selectedClientId, setConnected, setTestConnection, addTerminalLine]);
 
-  // Load customers
+  // Load customers - always load all data, filter client-side
   const loadCustomers = useCallback(async (searchQuery = '') => {
     if (!selectedClientId) {
       return;
     }
 
     try {
-      setCustomersLoading(true);
+      // Only show loading spinner on initial load (when no data exists)
+      const isInitialLoad = customers.length === 0;
+      if (isInitialLoad) {
+        setCustomersLoading(true);
+      }
       const params = { client_id: selectedClientId };
       if (searchQuery.trim()) {
         params.search = searchQuery.trim();
       }
+      // Always load all customers - filtering happens client-side
       const response = await axios.get('/sales/cached-customers', { params });
       const customersData = response.data.customers || [];
       // Debug: log first customer keys to see order
       if (customersData.length > 0) {
         console.log('First customer keys order:', Object.keys(customersData[0]));
       }
+      // Update data atomically - this prevents flashing
       setCustomers(customersData);
       setCustomersLastUpdated(response.data.last_updated || null);
+      
+      // Counts are loaded separately from API endpoints, so we don't need to calculate here
     } catch (error) {
       console.error('Failed to load customers:', error);
       if (error.response?.status === 401) {
@@ -134,20 +151,25 @@ const DataView = () => {
     } finally {
       setCustomersLoading(false);
     }
-  }, [selectedClientId]);
+  }, [selectedClientId, customers.length]);
 
-  // Load products
+  // Load products - always load all data, filter client-side
   const loadProducts = useCallback(async (searchQuery = '') => {
     if (!selectedClientId) {
       return;
     }
 
     try {
-      setProductsLoading(true);
+      // Only show loading spinner on initial load (when no data exists)
+      const isInitialLoad = products.length === 0;
+      if (isInitialLoad) {
+        setProductsLoading(true);
+      }
       const params = { client_id: selectedClientId };
       if (searchQuery.trim()) {
         params.search = searchQuery.trim();
       }
+      // Always load all products - filtering happens client-side
       // Add timestamp to prevent caching
       params._t = Date.now();
       const response = await axios.get('/sales/cached-products', { params });
@@ -157,8 +179,11 @@ const DataView = () => {
         console.log('First product keys order:', Object.keys(productsData[0]));
       }
       console.log('Products loaded:', productsData.length || 0, 'products');
+      // Update data atomically - this prevents flashing
       setProducts(productsData);
       setProductsLastUpdated(response.data.last_updated || null);
+      
+      // Counts are loaded separately from API endpoints, so we don't need to calculate here
     } catch (error) {
       console.error('Failed to load products:', error);
       if (error.response?.status === 401) {
@@ -169,7 +194,7 @@ const DataView = () => {
     } finally {
       setProductsLoading(false);
     }
-  }, [selectedClientId]);
+  }, [selectedClientId, products.length]);
 
   // Refresh cache from Cin7 API
   const refreshCache = useCallback(async () => {
@@ -197,8 +222,8 @@ const DataView = () => {
       // Use allSettled so both loads happen even if one fails
       console.log('Reloading customers and products after cache refresh...');
       const results = await Promise.allSettled([
-        loadCustomers(customersSearch),
-        loadProducts(productsSearch)
+        loadCustomers(customersSearch, customersFilter),
+        loadProducts(productsSearch, productsFilter)
       ]);
       
       // Log any failures for debugging
@@ -222,20 +247,27 @@ const DataView = () => {
     setColumnSearch('');
   }, [activeTab]);
 
-  // Load data when client, tab, or search changes (with debounce for search only)
+  // Load data when client, tab, search, or filter changes (with debounce for search only)
   useEffect(() => {
     if (!selectedClientId) return;
     
     const clientChanged = prevClientIdRef.current !== selectedClientId;
     const tabChanged = prevTabRef.current !== activeTab;
-    const isInitialLoad = clientChanged || tabChanged;
+    const customersFilterChanged = prevCustomersFilterRef.current !== customersFilter;
+    const productsFilterChanged = prevProductsFilterRef.current !== productsFilter;
     
     prevClientIdRef.current = selectedClientId;
     prevTabRef.current = activeTab;
+    prevCustomersFilterRef.current = customersFilter;
+    prevProductsFilterRef.current = productsFilter;
     
-    // No debounce for initial load (client or tab change), debounce for search changes
+    // No debounce for initial load or tab change - debounce only for search changes
+    // Filter changes don't trigger API calls - filtering is client-side
+    const isInitialLoad = clientChanged || tabChanged;
     const delay = isInitialLoad ? 0 : 300;
     
+    // Only load data when client, tab, or search changes - NOT when filter changes
+    // Filtering happens client-side, so no API call needed
     const timeoutId = setTimeout(() => {
       if (activeTab === 'customers') {
         loadCustomers(customersSearch);
@@ -246,6 +278,81 @@ const DataView = () => {
 
     return () => clearTimeout(timeoutId);
   }, [selectedClientId, activeTab, customersSearch, productsSearch, loadCustomers, loadProducts]);
+  
+  // Update filter and tab from URL params when location changes
+  useEffect(() => {
+    const urlParams = new URLSearchParams(location.search);
+    const filter = urlParams.get('filter');
+    const tab = urlParams.get('tab');
+    
+    // Set active tab from URL if provided
+    if (tab === 'customers' || tab === 'products') {
+      setActiveTab(tab);
+    }
+    
+    // Set filter based on URL
+    if (filter === 'new') {
+      if (tab === 'customers') {
+        setCustomersFilter('new');
+      } else if (tab === 'products') {
+        setProductsFilter('new');
+      }
+    } else if (filter === 'all' || !filter) {
+      // Reset filters to 'all' if filter is 'all' or not specified
+      if (tab === 'customers') {
+        setCustomersFilter('all');
+      } else if (tab === 'products') {
+        setProductsFilter('all');
+      }
+    }
+  }, [location.search]);
+
+  // Load counts separately from API endpoints for accurate badge counts
+  useEffect(() => {
+    if (!selectedClientId) {
+      setNewCustomersCount(0);
+      setNewProductsCount(0);
+      return;
+    }
+
+    const loadCounts = async () => {
+      try {
+        const [customersResponse, productsResponse] = await Promise.all([
+          axios.get(`/sales/cached-customers/new-count?client_id=${selectedClientId}`).catch(() => ({ data: { count: 0 } })),
+          axios.get(`/sales/cached-products/new-count?client_id=${selectedClientId}`).catch(() => ({ data: { count: 0 } }))
+        ]);
+        
+        const customersCount = customersResponse.data.count || 0;
+        const productsCount = productsResponse.data.count || 0;
+        
+        setNewCustomersCount(customersCount);
+        setNewProductsCount(productsCount);
+        
+        // Switch to 'all' if 'new' filter is active but count is 0
+        if (customersFilter === 'new' && customersCount === 0) {
+          setCustomersFilter('all');
+        }
+        if (productsFilter === 'new' && productsCount === 0) {
+          setProductsFilter('all');
+        }
+      } catch (error) {
+        console.error('Failed to load counts:', error);
+      }
+    };
+
+    loadCounts();
+    
+    // Refresh counts when data is refreshed or when marking as reviewed
+    const handleRefreshCounts = () => {
+      loadCounts();
+    };
+    
+    window.addEventListener('refreshSidebarCounts', handleRefreshCounts);
+    
+    return () => {
+      window.removeEventListener('refreshSidebarCounts', handleRefreshCounts);
+    };
+  }, [selectedClientId, customersFilter, productsFilter]);
 
   // Hardcoded API response column order (from Cin7 API)
   const API_CUSTOMER_COLUMN_ORDER = [
@@ -585,6 +692,31 @@ const DataView = () => {
     toast.success(`Downloaded ${isCustomers ? 'customers' : 'products'} CSV`);
   }, [activeTab, customers, products, customerColumns, productColumns]);
 
+  // Mark customer/product as reviewed
+  const markAsReviewed = useCallback(async (cacheId, type) => {
+    try {
+      const endpoint = type === 'customer' 
+        ? `/sales/cached-customers/${cacheId}/review`
+        : `/sales/cached-products/${cacheId}/review`;
+      
+      await axios.post(endpoint);
+      toast.success(`${type === 'customer' ? 'Customer' : 'Product'} marked as reviewed`);
+      
+      // Reload data
+      if (type === 'customer') {
+        loadCustomers(customersSearch, customersFilter);
+      } else {
+        loadProducts(productsSearch, productsFilter);
+      }
+      
+      // Trigger sidebar refresh
+      window.dispatchEvent(new Event('refreshSidebarCounts'));
+    } catch (error) {
+      console.error(`Failed to mark ${type} as reviewed:`, error);
+      toast.error(`Failed to mark as reviewed: ${error.response?.data?.error || error.message}`);
+    }
+  }, [customersSearch, customersFilter, productsSearch, productsFilter, loadCustomers, loadProducts]);
+
   const formatValue = (value) => {
     if (value === null || value === undefined) return '-';
     if (typeof value === 'object') return JSON.stringify(value);
@@ -594,7 +726,26 @@ const DataView = () => {
   const formatDate = (dateString) => {
     if (!dateString) return '-';
     try {
-      return new Date(dateString).toLocaleString();
+      // Backend sends UTC times in ISO format without 'Z' suffix
+      // We need to append 'Z' to tell JavaScript it's UTC, then it will convert to local time
+      let dateStr = dateString;
+      // If the string doesn't end with 'Z' and doesn't have a timezone offset (+/-), assume it's UTC
+      if (!dateStr.endsWith('Z') && !dateStr.match(/[+-]\d{2}:\d{2}$/)) {
+        dateStr = dateStr + 'Z';
+      }
+      const date = new Date(dateStr);
+      // Check if date is valid
+      if (isNaN(date.getTime())) return '-';
+      // Format as local date and time - toLocaleString automatically converts UTC to local timezone
+      return date.toLocaleString('en-US', {
+        month: '2-digit',
+        day: '2-digit',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+      });
     } catch {
       return dateString;
     }
@@ -623,26 +774,66 @@ const DataView = () => {
                 </TabsTrigger>
               </TabsList>
               {activeTab === 'customers' && (
-                <div className="relative max-w-sm">
-                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                  <Input
-                    placeholder="Search customers..."
-                    value={customersSearch}
-                    onChange={(e) => setCustomersSearch(e.target.value)}
-                    className="pl-7 h-9 text-xs"
-                  />
-                </div>
+                <>
+                  <div className="relative max-w-sm">
+                    <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                    <Input
+                      placeholder="Search customers..."
+                      value={customersSearch}
+                      onChange={(e) => setCustomersSearch(e.target.value)}
+                      className="pl-7 h-9 text-xs"
+                    />
+                  </div>
+                  <Tabs value={customersFilter} onValueChange={setCustomersFilter} className="w-auto">
+                    <TabsList className="h-9 p-1">
+                      <TabsTrigger value="all" className="text-xs py-1.5 px-3">
+                        All
+                      </TabsTrigger>
+                      <TabsTrigger 
+                        value="new" 
+                        className="text-xs py-1.5 px-3"
+                        disabled={newCustomersCount === 0}
+                      >
+                        New {newCustomersCount > 0 && (
+                          <Badge variant="default" className="ml-1.5 text-[10px] px-1 py-0 h-4 bg-blue-500">
+                            {newCustomersCount}
+                          </Badge>
+                        )}
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </>
               )}
               {activeTab === 'products' && (
-                <div className="relative max-w-sm">
-                  <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                  <Input
-                    placeholder="Search products..."
-                    value={productsSearch}
-                    onChange={(e) => setProductsSearch(e.target.value)}
-                    className="pl-7 h-9 text-xs"
-                  />
-                </div>
+                <>
+                  <div className="relative max-w-sm">
+                    <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                    <Input
+                      placeholder="Search products..."
+                      value={productsSearch}
+                      onChange={(e) => setProductsSearch(e.target.value)}
+                      className="pl-7 h-9 text-xs"
+                    />
+                  </div>
+                  <Tabs value={productsFilter} onValueChange={setProductsFilter} className="w-auto">
+                    <TabsList className="h-9 p-1">
+                      <TabsTrigger value="all" className="text-xs py-1.5 px-3">
+                        All
+                      </TabsTrigger>
+                      <TabsTrigger 
+                        value="new" 
+                        className="text-xs py-1.5 px-3"
+                        disabled={newProductsCount === 0}
+                      >
+                        New {newProductsCount > 0 && (
+                          <Badge variant="default" className="ml-1.5 text-[10px] px-1 py-0 h-4 bg-blue-500">
+                            {newProductsCount}
+                          </Badge>
+                        )}
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </>
               )}
               <div className="flex items-center gap-2 flex-1 justify-end">
                 <Button
@@ -810,7 +1001,7 @@ const DataView = () => {
           </div>
         </div>
         <TabsContent value="customers" ref={customersTabContentRef} className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
-          <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex flex-col min-h-0 relative">
             {customersLoading && customers.length === 0 ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -826,19 +1017,37 @@ const DataView = () => {
                   <Table className="border-0 border-separate border-spacing-0">
                       <TableHeader className="bg-white">
                         <TableRow className="bg-white">
+                          {customersFilter === 'new' && (
+                            <TableHead 
+                              className="text-xs font-semibold text-center sticky left-0 top-0 z-30 bg-white h-8 py-1"
+                              style={{ 
+                                position: 'sticky',
+                                left: 0,
+                                top: 0,
+                                zIndex: 31,
+                                backgroundColor: '#ffffff',
+                                width: '60px',
+                                minWidth: '60px',
+                                maxWidth: '60px'
+                              }}
+                            >
+                              Review
+                            </TableHead>
+                          )}
                           {customerColumns.map((column, colIdx) => {
                             const isNameColumn = column === 'Name';
+                            const nameLeftOffset = customersFilter === 'new' ? '60px' : '0';
                             return (
                               <TableHead 
                                 key={column} 
-                                className={`text-xs font-semibold whitespace-nowrap ${
+                                className={`text-xs font-semibold whitespace-nowrap h-8 py-1 ${
                                   isNameColumn 
                                     ? 'border-r-2 border-gray-200' 
                                     : ''
                                 }`}
                                 style={isNameColumn ? { 
                                   position: 'sticky',
-                                  left: 0,
+                                  left: nameLeftOffset,
                                   top: 0,
                                   zIndex: 30,
                                   backgroundColor: '#ffffff',
@@ -856,10 +1065,38 @@ const DataView = () => {
                           })}
                         </TableRow>
                       </TableHeader>
-                      <TableBody>
-                        {customers.map((customer, idx) => {
+                      <TableBody style={{ '--tw-border-opacity': '1' }} className="[&_tr]:border-b [&_tr:last-child]:!border-b [&_tr:last-child]:border-gray-200 [&_tr:last-child_td]:!border-b [&_tr:last-child_td]:border-gray-200">
+                        {customers
+                          .filter(customer => customersFilter === 'all' || customer._is_new)
+                          .map((customer, idx, arr) => {
+                          const isNew = customer._is_new;
+                          const cacheId = customer._cache_id;
+                          const nameLeftOffset = customersFilter === 'new' ? '60px' : '0';
+                          const isLastRow = idx === arr.length - 1;
                           return (
-                            <TableRow key={idx}>
+                            <TableRow key={idx} className="border-b" style={{ borderBottom: '1px solid #e5e7eb !important' }}>
+                              {customersFilter === 'new' && (
+                                <TableCell 
+                                  className="text-xs text-center sticky left-0 bg-white z-10 cursor-pointer"
+                                  style={{ 
+                                    position: 'sticky',
+                                    left: 0,
+                                    zIndex: 11,
+                                    backgroundColor: '#ffffff',
+                                    width: '60px',
+                                    minWidth: '60px',
+                                    maxWidth: '60px'
+                                  }}
+                                  onClick={() => isNew && markAsReviewed(cacheId, 'customer')}
+                                  title={isNew ? 'Click to mark as reviewed' : 'Reviewed'}
+                                >
+                                  {isNew ? (
+                                    <Circle className="h-4 w-4 text-muted-foreground hover:text-blue-500 mx-auto" />
+                                  ) : (
+                                    <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto" />
+                                  )}
+                                </TableCell>
+                              )}
                               {customerColumns.map((column, colIdx) => {
                                 const isNameColumn = column === 'Name';
                                 return (
@@ -867,14 +1104,24 @@ const DataView = () => {
                                     key={column} 
                                     className={`text-xs whitespace-nowrap ${
                                       isNameColumn 
-                                        ? 'sticky left-0 bg-white z-10 border-r-2 border-gray-200' 
+                                        ? 'sticky bg-white z-10 border-r-2 border-gray-200' 
                                         : ''
                                     }`}
                                     style={isNameColumn ? { 
+                                      left: nameLeftOffset,
                                       borderRightColor: '#e5e7eb'
                                     } : {}}
                                   >
-                                    {formatValue(customer[column])}
+                                    {isNameColumn && customer._is_new ? (
+                                      <div className="flex items-center gap-2">
+                                        <span>{formatValue(customer[column])}</span>
+                                        <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 bg-blue-500">
+                                          New
+                                        </Badge>
+                                      </div>
+                                    ) : (
+                                      formatValue(customer[column])
+                                    )}
                                   </TableCell>
                                 );
                               })}
@@ -883,7 +1130,7 @@ const DataView = () => {
                         })}
                       </TableBody>
                     </Table>
-                  </div>
+                </div>
                   {(customers.length > 0 || customersLastUpdated) && (
                     <div className="sticky bottom-0 bg-gray-50 border-t px-4 py-1 z-10 flex items-center justify-between">
                       <div className="text-xs text-muted-foreground">
@@ -902,7 +1149,7 @@ const DataView = () => {
         </TabsContent>
 
         <TabsContent value="products" className="mt-0 flex-1 flex flex-col min-h-0 px-6 pb-6 data-[state=inactive]:hidden">
-          <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex flex-col min-h-0 relative">
             {productsLoading && products.length === 0 ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -913,24 +1160,42 @@ const DataView = () => {
                 No products found. {productsSearch && 'Try adjusting your search.'}
               </div>
             ) : (
-              <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0">
+              <div className="flex-1 overflow-hidden border-[1px] rounded-md bg-white flex flex-col min-h-0 relative">
                 <div className="flex-1 overflow-auto">
                   <Table className="border-0 border-separate border-spacing-0">
                       <TableHeader className="bg-white">
                         <TableRow className="bg-white">
+                          {productsFilter === 'new' && (
+                            <TableHead 
+                              className="text-xs font-semibold text-center sticky left-0 top-0 z-30 bg-white h-8 py-1"
+                              style={{ 
+                                position: 'sticky',
+                                left: 0,
+                                top: 0,
+                                zIndex: 31,
+                                backgroundColor: '#ffffff',
+                                width: '60px',
+                                minWidth: '60px',
+                                maxWidth: '60px'
+                              }}
+                            >
+                              Review
+                            </TableHead>
+                          )}
                           {productColumns.map((column, colIdx) => {
                             const isNameColumn = column === 'Name';
+                            const nameLeftOffset = productsFilter === 'new' ? '60px' : '0';
                             return (
                               <TableHead 
                                 key={column} 
-                                className={`text-xs font-semibold whitespace-nowrap ${
+                                className={`text-xs font-semibold whitespace-nowrap h-8 py-1 ${
                                   isNameColumn 
                                     ? 'border-r-2 border-gray-200' 
                                     : ''
                                 }`}
                                 style={isNameColumn ? { 
                                   position: 'sticky',
-                                  left: 0,
+                                  left: nameLeftOffset,
                                   top: 0,
                                   zIndex: 30,
                                   backgroundColor: '#ffffff',
@@ -948,32 +1213,72 @@ const DataView = () => {
                           })}
                         </TableRow>
                       </TableHeader>
-                      <TableBody>
-                        {products.map((product, idx) => (
-                          <TableRow key={idx}>
-                            {productColumns.map((column, colIdx) => {
-                              const isNameColumn = column === 'Name';
-                              return (
+                      <TableBody style={{ '--tw-border-opacity': '1' }} className="[&_tr]:border-b [&_tr:last-child]:!border-b [&_tr:last-child]:border-gray-200 [&_tr:last-child_td]:!border-b [&_tr:last-child_td]:border-gray-200">
+                        {products
+                          .filter(product => productsFilter === 'all' || product._is_new)
+                          .map((product, idx, arr) => {
+                          const isNew = product._is_new;
+                          const cacheId = product._cache_id;
+                          const nameLeftOffset = productsFilter === 'new' ? '60px' : '0';
+                          const isLastRow = idx === arr.length - 1;
+                          return (
+                            <TableRow key={idx} className="border-b" style={{ borderBottom: '1px solid #e5e7eb !important' }}>
+                              {productsFilter === 'new' && (
                                 <TableCell 
-                                  key={column} 
-                                  className={`text-xs whitespace-nowrap ${
-                                    isNameColumn 
-                                      ? 'sticky left-0 bg-white z-10 border-r-2 border-gray-200' 
-                                      : ''
-                                  }`}
-                                  style={isNameColumn ? { 
-                                    borderRightColor: '#e5e7eb'
-                                  } : {}}
+                                  className="text-xs text-center sticky left-0 bg-white z-10 cursor-pointer"
+                                  style={{ 
+                                    position: 'sticky',
+                                    left: 0,
+                                    zIndex: 11,
+                                    backgroundColor: '#ffffff',
+                                    width: '60px',
+                                    minWidth: '60px',
+                                    maxWidth: '60px'
+                                  }}
+                                  onClick={() => isNew && markAsReviewed(cacheId, 'product')}
+                                  title={isNew ? 'Click to mark as reviewed' : 'Reviewed'}
                                 >
-                                  {formatValue(product[column])}
+                                  {isNew ? (
+                                    <Circle className="h-4 w-4 text-muted-foreground hover:text-blue-500 mx-auto" />
+                                  ) : (
+                                    <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto" />
+                                  )}
                                 </TableCell>
-                              );
-                            })}
-                          </TableRow>
-                        ))}
+                              )}
+                              {productColumns.map((column, colIdx) => {
+                                const isNameColumn = column === 'Name';
+                                return (
+                                  <TableCell 
+                                    key={column} 
+                                    className={`text-xs whitespace-nowrap ${
+                                      isNameColumn 
+                                        ? 'sticky bg-white z-10 border-r-2 border-gray-200' 
+                                        : ''
+                                    }`}
+                                    style={isNameColumn ? { 
+                                      left: nameLeftOffset,
+                                      borderRightColor: '#e5e7eb'
+                                    } : {}}
+                                  >
+                                    {isNameColumn && product._is_new ? (
+                                      <div className="flex items-center gap-2">
+                                        <span>{formatValue(product[column])}</span>
+                                        <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4 bg-blue-500">
+                                          New
+                                        </Badge>
+                                      </div>
+                                    ) : (
+                                      formatValue(product[column])
+                                    )}
+                                  </TableCell>
+                                );
+                              })}
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
-                  </div>
+                </div>
                   {(products.length > 0 || productsLastUpdated) && (
                     <div className="sticky bottom-0 bg-gray-50 border-t px-4 py-1 z-10 flex items-center justify-between">
                       <div className="text-xs text-muted-foreground">

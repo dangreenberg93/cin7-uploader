@@ -32,6 +32,8 @@ export function AppSidebar({ user, onLogout }) {
   const { selectedClient, selectedClientId, setSelectedClientId, clients } = useClient();
   const [failedOrdersCount, setFailedOrdersCount] = useState(0);
   const [unreviewedCount, setUnreviewedCount] = useState(0);
+  const [newCustomersCount, setNewCustomersCount] = useState(0);
+  const [newProductsCount, setNewProductsCount] = useState(0);
 
   // Reset avatar error state when user changes
   useEffect(() => {
@@ -55,6 +57,8 @@ export function AppSidebar({ user, onLogout }) {
     if (!selectedClientId) {
       setFailedOrdersCount(0);
       setUnreviewedCount(0);
+      setNewCustomersCount(0);
+      setNewProductsCount(0);
       return;
     }
 
@@ -67,6 +71,23 @@ export function AppSidebar({ user, onLogout }) {
         // Load unreviewed completed orders count - queries table directly
         const unreviewedResponse = await axios.get(`/webhooks/orders/completed/unreviewed-count?client_id=${selectedClientId}`);
         setUnreviewedCount(unreviewedResponse.data.unreviewed_count || 0);
+        
+        // Load new customers/products counts
+        try {
+          const newCustomersResponse = await axios.get(`/sales/cached-customers/new-count?client_id=${selectedClientId}`);
+          setNewCustomersCount(newCustomersResponse.data.count || 0);
+        } catch (error) {
+          console.error('Failed to load new customers count:', error);
+          setNewCustomersCount(0);
+        }
+        
+        try {
+          const newProductsResponse = await axios.get(`/sales/cached-products/new-count?client_id=${selectedClientId}`);
+          setNewProductsCount(newProductsResponse.data.count || 0);
+        } catch (error) {
+          console.error('Failed to load new products count:', error);
+          setNewProductsCount(0);
+        }
       } catch (error) {
         console.error('Failed to load queue counts:', error);
       }
@@ -200,7 +221,7 @@ export function AppSidebar({ user, onLogout }) {
                           navigate('/?tab=completed&review=needs-review'); 
                         }}>
                           <span>To Review</span>
-                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none hover:bg-blue-500">{unreviewedCount}</Badge>
+                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none">{unreviewedCount}</Badge>
                         </a>
                       </SidebarMenuButton>
                     )}
@@ -216,7 +237,7 @@ export function AppSidebar({ user, onLogout }) {
                           navigate('/?tab=failed'); 
                         }}>
                           <span>Failed Orders</span>
-                          <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center shadow-none hover:bg-destructive">{failedOrdersCount}</Badge>
+                          <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center shadow-none">{failedOrdersCount}</Badge>
                         </a>
                       </SidebarMenuButton>
                     )}
@@ -226,14 +247,50 @@ export function AppSidebar({ user, onLogout }) {
               <SidebarMenuItem>
                 <SidebarMenuButton 
                   asChild 
-                  isActive={location.pathname === '/data'}
+                  isActive={location.pathname === '/data' && !location.search.includes('filter=new')}
                   className="data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
                 >
-                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/data'); }}>
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigate('/data?tab=customers&filter=all'); }}>
                     <Database />
                     <span>Data</span>
                   </a>
                 </SidebarMenuButton>
+                {(newCustomersCount > 0 || newProductsCount > 0) && (
+                  <div className="ml-6 mt-1 space-y-0.5">
+                    {newCustomersCount > 0 && (
+                      <SidebarMenuButton 
+                        asChild 
+                        size="sm"
+                        className="h-7 text-xs pl-2 data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
+                        isActive={location.pathname === '/data' && location.search.includes('filter=new') && location.search.includes('tab=customers')}
+                      >
+                        <a href="#" onClick={(e) => { 
+                          e.preventDefault(); 
+                          navigate('/data?tab=customers&filter=new'); 
+                        }}>
+                          <span>New Customers</span>
+                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none">{newCustomersCount}</Badge>
+                        </a>
+                      </SidebarMenuButton>
+                    )}
+                    {newProductsCount > 0 && (
+                      <SidebarMenuButton 
+                        asChild 
+                        size="sm"
+                        className="h-7 text-xs pl-2 data-[active=true]:bg-primary/10 data-[active=true]:text-sidebar-foreground data-[active=true]:font-semibold"
+                        isActive={location.pathname === '/data' && location.search.includes('filter=new') && location.search.includes('tab=products')}
+                      >
+                        <a href="#" onClick={(e) => { 
+                          e.preventDefault(); 
+                          navigate('/data?tab=products&filter=new'); 
+                        }}>
+                          <span>New Products</span>
+                          <Badge variant="default" className="ml-auto text-[10px] px-1.5 py-0 h-4 w-6 flex items-center justify-center bg-blue-500 shadow-none">{newProductsCount}</Badge>
+                        </a>
+                      </SidebarMenuButton>
+                    )}
+                  </div>
+                )}
               </SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>

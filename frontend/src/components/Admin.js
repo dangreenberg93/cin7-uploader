@@ -1033,7 +1033,7 @@ const Admin = ({ user }) => {
                               <span>{user.email}</span>
                               {user.email && !user.email.endsWith('@paleblue.nyc') && (
                                 <Badge 
-                                  className="text-xs bg-purple-100 text-purple-700 border-purple-200 shadow-none hover:bg-purple-100 pointer-events-none py-0 px-1.5"
+                                  className="text-xs bg-purple-100 text-purple-700 border-purple-200 shadow-none pointer-events-none py-0 px-1.5"
                                 >
                                   External
                                 </Badge>

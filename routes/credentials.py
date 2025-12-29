@@ -21,13 +21,13 @@ def get_credentials(client_id):
     
     try:
         # Get credentials - can match by client_id or credential_id (for standalone)
-        # Check if customer default columns exist
+        # Check if customer and product default columns exist
         check_columns_query = text("""
             SELECT column_name 
             FROM information_schema.columns 
             WHERE table_schema = 'voyager' 
             AND table_name = 'client_erp_credentials' 
-            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set')
+            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products')
         """)
         existing_columns = {row[0] for row in db.session.execute(check_columns_query).fetchall()}
         
@@ -36,6 +36,11 @@ def get_credentials(client_id):
         has_customer_revenue_account = 'customer_revenue_account' in existing_columns
         has_customer_tax_rule = 'customer_tax_rule' in existing_columns
         has_customer_attribute_set = 'customer_attribute_set' in existing_columns
+        has_product_costing_method = 'product_costing_method' in existing_columns
+        has_product_default_price_tier = 'product_default_price_tier' in existing_columns
+        has_product_default_price = 'product_default_price' in existing_columns
+        has_product_currency = 'product_currency' in existing_columns
+        has_auto_create = 'auto_create_customers_products' in existing_columns
         
         # Build SELECT fields
         select_fields = [
@@ -74,6 +79,31 @@ def get_credentials(client_id):
         else:
             select_fields.append('NULL as customer_attribute_set')
         
+        if has_product_costing_method:
+            select_fields.append('cec.product_costing_method')
+        else:
+            select_fields.append('NULL as product_costing_method')
+        
+        if has_product_default_price_tier:
+            select_fields.append('cec.product_default_price_tier')
+        else:
+            select_fields.append('NULL as product_default_price_tier')
+        
+        if has_product_default_price:
+            select_fields.append('cec.product_default_price')
+        else:
+            select_fields.append('NULL as product_default_price')
+        
+        if has_product_currency:
+            select_fields.append('cec.product_currency')
+        else:
+            select_fields.append('NULL as product_currency')
+        
+        if has_auto_create:
+            select_fields.append('cec.auto_create_customers_products')
+        else:
+            select_fields.append('false as auto_create_customers_products')
+        
         select_fields.append('c.name as client_name')
         
         query = text(f"""
@@ -82,7 +112,7 @@ def get_credentials(client_id):
             FROM voyager.client_erp_credentials cec
             LEFT JOIN voyager.client c ON c.id = cec.client_id
             WHERE cec.erp = 'cin7_core'
-            AND (cec.client_id = :client_id OR cec.id = :client_id)
+            AND cec.id = :client_id
         """)
         
         result = db.session.execute(query, {'client_id': client_uuid})
@@ -127,6 +157,31 @@ def get_credentials(client_id):
             response_data['customer_attribute_set'] = row.customer_attribute_set
         else:
             response_data['customer_attribute_set'] = None
+        
+        if has_product_costing_method and hasattr(row, 'product_costing_method'):
+            response_data['product_costing_method'] = row.product_costing_method
+        else:
+            response_data['product_costing_method'] = None
+        
+        if has_product_default_price_tier and hasattr(row, 'product_default_price_tier'):
+            response_data['product_default_price_tier'] = row.product_default_price_tier
+        else:
+            response_data['product_default_price_tier'] = None
+        
+        if has_product_default_price and hasattr(row, 'product_default_price'):
+            response_data['product_default_price'] = float(row.product_default_price) if row.product_default_price is not None else None
+        else:
+            response_data['product_default_price'] = None
+        
+        if has_product_currency and hasattr(row, 'product_currency'):
+            response_data['product_currency'] = row.product_currency
+        else:
+            response_data['product_currency'] = None
+        
+        if has_auto_create and hasattr(row, 'auto_create_customers_products'):
+            response_data['auto_create_customers_products'] = bool(row.auto_create_customers_products)
+        else:
+            response_data['auto_create_customers_products'] = False
         
         return jsonify(response_data)
     except Exception as e:
@@ -274,13 +329,13 @@ def update_credential_settings(client_id):
             updates.append('default_status = :default_status')
             params['default_status'] = data['default_status']
         
-        # Check which columns exist for customer defaults
+        # Check which columns exist for customer and product defaults
         check_columns_query = text("""
             SELECT column_name 
             FROM information_schema.columns 
             WHERE table_schema = 'voyager' 
             AND table_name = 'client_erp_credentials' 
-            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set')
+            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products')
         """)
         existing_columns = {row[0] for row in db.session.execute(check_columns_query).fetchall()}
         
@@ -326,6 +381,33 @@ def update_credential_settings(client_id):
             updates.append('customer_attribute_set = :customer_attribute_set')
             params['customer_attribute_set'] = data['customer_attribute_set'] or None
         
+        if 'product_costing_method' in data and 'product_costing_method' in existing_columns:
+            updates.append('product_costing_method = :product_costing_method')
+            params['product_costing_method'] = data['product_costing_method'] or None
+        
+        if 'product_default_price_tier' in data and 'product_default_price_tier' in existing_columns:
+            updates.append('product_default_price_tier = :product_default_price_tier')
+            params['product_default_price_tier'] = data['product_default_price_tier'] or None
+        
+        if 'product_default_price' in data and 'product_default_price' in existing_columns:
+            if data['product_default_price'] is not None:
+                try:
+                    price = float(data['product_default_price'])
+                    updates.append('product_default_price = :product_default_price')
+                    params['product_default_price'] = price
+                except (ValueError, TypeError):
+                    return jsonify({'error': 'Invalid product_default_price format (must be a number)'}), 400
+            else:
+                updates.append('product_default_price = NULL')
+        
+        if 'product_currency' in data and 'product_currency' in existing_columns:
+            updates.append('product_currency = :product_currency')
+            params['product_currency'] = data['product_currency'] or None
+        
+        if 'auto_create_customers_products' in data and 'auto_create_customers_products' in existing_columns:
+            updates.append('auto_create_customers_products = :auto_create_customers_products')
+            params['auto_create_customers_products'] = bool(data['auto_create_customers_products'])
+        
         if not updates:
             return jsonify({'error': 'No fields to update'}), 400
         
@@ -341,13 +423,25 @@ def update_credential_settings(client_id):
             return_fields_list.append('customer_tax_rule')
         if 'customer_attribute_set' in existing_columns:
             return_fields_list.append('customer_attribute_set')
+        if 'product_costing_method' in existing_columns:
+            return_fields_list.append('product_costing_method')
+        if 'product_default_price_tier' in existing_columns:
+            return_fields_list.append('product_default_price_tier')
+        if 'product_default_price' in existing_columns:
+            return_fields_list.append('product_default_price')
+        if 'product_currency' in existing_columns:
+            return_fields_list.append('product_currency')
+        if 'auto_create_customers_products' in existing_columns:
+            return_fields_list.append('auto_create_customers_products')
         return_fields = ', '.join(return_fields_list)
         
+        # Update existing credentials (they always exist when a profile is selected)
+        # Use id from client_erp_credentials table
         query = text(f"""
             UPDATE voyager.client_erp_credentials
             SET {', '.join(updates)}
             WHERE erp = 'cin7_core'
-            AND (client_id = :client_id OR id = :client_id)
+            AND id = :client_id
             RETURNING {return_fields}
         """)
         
@@ -356,7 +450,7 @@ def update_credential_settings(client_id):
         
         row = result.fetchone()
         if not row:
-            return jsonify({'error': 'Credentials not found'}), 404
+            return jsonify({'error': 'Credentials not found for this client. Please ensure a Cin7 profile is configured.'}), 404
         
         response_data = {
             'id': str(row.id),
@@ -379,6 +473,21 @@ def update_credential_settings(client_id):
         
         if 'customer_attribute_set' in existing_columns and hasattr(row, 'customer_attribute_set'):
             response_data['customer_attribute_set'] = row.customer_attribute_set
+        
+        if 'product_costing_method' in existing_columns and hasattr(row, 'product_costing_method'):
+            response_data['product_costing_method'] = row.product_costing_method
+        
+        if 'product_default_price_tier' in existing_columns and hasattr(row, 'product_default_price_tier'):
+            response_data['product_default_price_tier'] = row.product_default_price_tier
+        
+        if 'product_default_price' in existing_columns and hasattr(row, 'product_default_price'):
+            response_data['product_default_price'] = float(row.product_default_price) if row.product_default_price is not None else None
+        
+        if 'product_currency' in existing_columns and hasattr(row, 'product_currency'):
+            response_data['product_currency'] = row.product_currency
+        
+        if 'auto_create_customers_products' in existing_columns and hasattr(row, 'auto_create_customers_products'):
+            response_data['auto_create_customers_products'] = bool(row.auto_create_customers_products)
         
         return jsonify(response_data)
     except Exception as e:
@@ -405,7 +514,7 @@ def get_accounts(client_id):
                 cec.cin7_api_auth_applicationkey as application_key
             FROM voyager.client_erp_credentials cec
             WHERE cec.erp = 'cin7_core'
-            AND (cec.client_id = :client_id OR cec.id = :client_id)
+            AND cec.id = :client_id
         """)
         result = db.session.execute(query, {'client_id': client_uuid})
         cred_row = result.fetchone()
@@ -462,7 +571,7 @@ def get_tax_rules(client_id):
                 cec.cin7_api_auth_applicationkey as application_key
             FROM voyager.client_erp_credentials cec
             WHERE cec.erp = 'cin7_core'
-            AND (cec.client_id = :client_id OR cec.id = :client_id)
+            AND cec.id = :client_id
         """)
         result = db.session.execute(query, {'client_id': client_uuid})
         cred_row = result.fetchone()
@@ -515,7 +624,7 @@ def get_attribute_sets(client_id):
                 cec.cin7_api_auth_applicationkey as application_key
             FROM voyager.client_erp_credentials cec
             WHERE cec.erp = 'cin7_core'
-            AND (cec.client_id = :client_id OR cec.id = :client_id)
+            AND cec.id = :client_id
         """)
         result = db.session.execute(query, {'client_id': client_uuid})
         cred_row = result.fetchone()
@@ -584,7 +693,7 @@ def test_credentials(client_id):
                 cin7_api_auth_applicationkey as application_key
             FROM voyager.client_erp_credentials
             WHERE erp = 'cin7_core'
-            AND (client_id = :client_id OR id = :client_id)
+            AND id = :client_id
         """)
         
         result = db.session.execute(query, {'client_id': client_uuid})
