@@ -544,7 +544,7 @@ def validate_data():
         logger.warning(f"WARNING: upload_id not found in session! Session keys: {list(session.keys())}")
         logger.warning("This may be an old session created before the fix. API calls will be logged without upload_id.")
     
-    logger.info(f"DEBUG: Using credential_id {credential_id_for_logging} for API logging, upload_id: {upload_id}")
+    logger.debug(f"Using credential_id {credential_id_for_logging} for API logging, upload_id: {upload_id}")
     
     # Create logging callback for validation API calls
     def log_api_call(endpoint, method, request_url, request_headers, request_body,
@@ -626,11 +626,9 @@ def validate_data():
         }), 400
     
     # Preload latest customers and products from Cin7
-    logger.info("DEBUG: About to call preload_customers_and_products()")
     try:
         customer_count, product_count = validator.preload_customers_and_products()
         logger.info(f"Preloaded {customer_count} customers and {product_count} products for validation")
-        logger.info(f"DEBUG: preload completed successfully - this should have created API logs")
     except Exception as e:
         logger.warning(f"Warning: Failed to preload customers/products: {str(e)}")
         import traceback

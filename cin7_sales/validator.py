@@ -165,8 +165,8 @@ class SalesOrderValidator:
                     customers = self.api_client.search_customer(name=customer_name)
                 
                 if customers and len(customers) > 0:
-                    # If we found by AdditionalAttribute1, use the first match directly
-                    if additional_attribute1 and customers:
+                    # If we found by customer code field, use the first match directly
+                    if customer_code_value and customers:
                         customer = customers[0]
                         # Create a match result for consistency (exact match, so score is 1.0)
                         customer_match_result = (customer, 1.0, [(customer, 1.0)])
@@ -917,7 +917,8 @@ class SalesOrderValidator:
                             product_data['ID'] = str(cached.cin7_product_id)
                         products.append(product_data)
             except Exception as e:
-                print(f"Error loading from database cache: {str(e)}, falling back to API")
+                # Log error but continue - will fallback to API
+                pass  # Error is handled by falling back to API call below
         
         # Load customers from API if not loaded from cache
         try:
@@ -972,7 +973,8 @@ class SalesOrderValidator:
             
             self.customers_loaded = True
         except Exception as e:
-            print(f"Error preloading customers: {str(e)}")
+            # Error is logged by the API client, just mark as not loaded
+            pass
         
         # Load products from API if not loaded from cache
         try:
@@ -1000,7 +1002,8 @@ class SalesOrderValidator:
             
             self.products_loaded = True
         except Exception as e:
-            print(f"Error preloading products: {str(e)}")
+            # Error is logged by the API client, just mark as not loaded
+            pass
         
         return customer_count, product_count
 

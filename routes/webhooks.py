@@ -1212,7 +1212,6 @@ def process_single_order(
                             logger.info(f"Product SKU '{sku}' already exists (409), checking cache first...")
                             
                             # Check if product is already in our database cache
-                            from database import CachedProduct
                             cached_product = CachedProduct.query.filter_by(
                                 client_erp_credentials_id=credential_id_for_logging,
                                 sku=sku
@@ -3117,7 +3116,6 @@ def process_webhook_csv(
                     logger.info(f"Product SKU '{sku}' already exists in Cin7, checking cache first...")
                     
                     # Check if product is already in our database cache
-                    from database import CachedProduct
                     cached_product = CachedProduct.query.filter_by(
                         client_erp_credentials_id=credential_id_for_logging,
                         sku=sku
@@ -3544,6 +3542,15 @@ def receive_email_webhook():
                 from database import db  # Import db once at function level
                 app = create_app('production' if os.environ.get('FLASK_ENV') == 'production' else 'development')
                 with app.app_context():
+                    # Ensure upload status is set to processing at the start
+                    try:
+                        upload_check = SalesOrderUpload.query.get(upload_id)
+                        if upload_check and upload_check.status != 'processing':
+                            upload_check.status = 'processing'
+                            db.session.commit()
+                            logger.info(f"Set upload {upload_id} status to processing at thread start")
+                    except Exception as init_error:
+                        logger.warning(f"Could not verify upload status at thread start: {str(init_error)}")
                     try:
                         result = process_webhook_csv(
                             upload_id=upload_id,
