@@ -16,10 +16,20 @@ def send_password_reset_email(email, reset_token):
     """
     try:
         # Get frontend URL from config
-        frontend_url = current_app.config.get('FRONTEND_URL', 'https://cin7-uploader-1084228140944.us-central1.run.app')
+        # Default based on environment: localhost for dev, production URL otherwise
+        import os
+        if os.environ.get('FLASK_ENV') == 'development':
+            default_url = 'http://localhost:3000'
+        else:
+            default_url = 'https://cin7-uploader-1084228140944.us-central1.run.app'
+        frontend_url = current_app.config.get('FRONTEND_URL', default_url)
         
         # Create reset link
         reset_link = f"{frontend_url}/reset-password?token={reset_token}"
+        
+        # Create logo URL
+        logo_url = f"{frontend_url}/logo.jpg"
+        print(f"Logo URL for email: {logo_url}")
         
         # Get sender from config
         sender = current_app.config.get('MAIL_DEFAULT_SENDER') or current_app.config.get('MAIL_USERNAME')
@@ -41,38 +51,54 @@ def send_password_reset_email(email, reset_token):
             background-color: #ffffff;
             margin: 0;
             padding: 0;
+            text-align: left;
         }}
         .container {{
             max-width: 600px;
-            margin: 0 auto;
+            margin: 0;
+            margin-left: 0;
+            margin-right: auto;
             padding: 40px 20px;
             background-color: #ffffff;
+            text-align: left;
         }}
         .header {{
             margin-bottom: 32px;
+            text-align: left;
+        }}
+        .logo {{
+            max-width: 120px;
+            height: auto;
+            margin-bottom: 24px;
+            display: block;
         }}
         .title {{
-            font-size: 24px;
+            font-size: 18px;
             font-weight: 600;
             color: #09090b;
             margin: 0 0 8px 0;
             letter-spacing: -0.025em;
+            text-align: left;
         }}
         .subtitle {{
             font-size: 14px;
             color: #71717a;
             margin: 0;
+            text-align: left;
         }}
         .content {{
             margin-bottom: 32px;
+            text-align: left;
         }}
         .text {{
             font-size: 14px;
             color: #27272a;
             margin: 0 0 16px 0;
+            text-align: left;
         }}
         .button-container {{
             margin: 32px 0;
+            text-align: left;
         }}
         .button {{
             display: inline-block;
@@ -117,28 +143,40 @@ def send_password_reset_email(email, reset_token):
             padding: 8px;
             border-radius: 4px;
             margin-top: 16px;
+            text-align: left;
+        }}
+        .caption {{
+            font-size: 11px;
+            color: #71717a;
+            font-style: italic;
+            margin: 8px 0 0 0;
+            text-align: left;
         }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1 class="title">Password Reset Request</h1>
-            <p class="subtitle">Cin7 Uploader</p>
+    <div class="container" style="text-align: left;">
+        <div class="header" style="text-align: left;">
+            <img src="{logo_url}" alt="Cin7 Uploader" class="logo" style="max-width: 120px; width: 120px; height: auto; margin-bottom: 24px; display: block; border: 0; outline: none; text-decoration: none;" />
+            <h1 class="title" style="text-align: left;">Password Reset Request</h1>
+            <p class="subtitle" style="text-align: left;">Cin7 Uploader</p>
         </div>
         
-        <div class="content">
-            <p class="text">You requested to reset your password. Click the button below to reset it:</p>
+        <div class="content" style="text-align: left;">
+            <p class="text" style="text-align: left;">You requested to reset your password. Click the button below to reset it:</p>
             
-            <div class="button-container">
-                <a href="{reset_link}" class="button">Reset Password</a>
+            <div class="button-container" style="text-align: left;">
+                <a href="{reset_link}" class="button" style="text-align: left;">Reset Password</a>
             </div>
             
-            <p class="text">Or copy and paste this link into your browser:</p>
-            <div class="link-text">{reset_link}</div>
+            <p class="text" style="text-align: left;">Or copy and paste this link into your browser:</p>
+            <div class="link-text" style="text-align: left;">{reset_link}</div>
+            
+            <p class="caption" style="font-size: 11px; color: #71717a; font-style: italic; margin: 8px 0 0 0; text-align: left;">This link will expire in 1 hour.</p>
+            <p class="text" style="text-align: left;">If you didn't request this, please ignore this email.</p>
         </div>
         
-        <div class="footer">
+        <div class="footer" style="text-align: left;">
         </div>
     </div>
 </body>
@@ -152,7 +190,7 @@ You requested to reset your password. Click the link below to reset it:
 
 {reset_link}
 
-This link will expire in 1 hour. If you didn't request this, please ignore this email.
+This link will expire in 1 hour.
 """
         
         msg = Message(
