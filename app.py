@@ -105,12 +105,36 @@ def create_app(config_name=None):
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')
     def serve(path):
-        # For non-API routes, serve static files if they exist, otherwise serve index.html
-        # API routes are handled by blueprints registered above, so they won't reach here
-        if path != "" and os.path.exists(app.static_folder + '/' + path):
-            return app.send_static_file(path)
+        # Skip API routes - they should be handled by blueprints above
+        if path.startswith('api/'):
+            from flask import abort
+            abort(404)
+        
+        # For non-API routes, check if it's a static file (has extension)
+        # If it's a static file and exists, serve it
+        if path and '.' in path.split('/')[-1]:
+            static_path = os.path.join(app.static_folder, path)
+            if os.path.exists(static_path) and os.path.isfile(static_path):
+                try:
+                    return app.send_static_file(path)
+                except:
+                    pass  # Fall through to serve index.html if static file fails
+        
+        # For all other routes (including React Router routes like /reset-password),
+        # serve index.html so React Router can handle the routing
+        index_path = os.path.join(app.static_folder, 'index.html')
+        if os.path.exists(index_path):
+            from flask import send_from_directory
+            return send_from_directory(app.static_folder, 'index.html')
         else:
-            return app.send_static_file('index.html')
+            # If index.html doesn't exist, return a helpful error
+            print(f"index.html not found in static folder: {app.static_folder}")
+            from flask import Response
+            return Response(
+                f"Frontend not built. Please run 'npm run build' in the frontend directory.\nStatic folder: {app.static_folder}",
+                mimetype='text/plain',
+                status=500
+            )
     
     return app
 
