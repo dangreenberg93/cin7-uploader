@@ -1259,48 +1259,48 @@ def process_single_order(
                                 try:
                                     products = api_client.search_product(sku=sku)
                                     if products and len(products) > 0:
-                                    existing_product = products[0]
-                                    product_id = existing_product.get('ID')
-                                    if product_id:
-                                        try:
-                                            product_id_uuid = uuid.UUID(str(product_id))
-                                            # Refresh product cache with existing product
-                                            from routes.sales import refresh_single_product_cache
-                                            refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, existing_product, is_new=False)
-                                            logger.info(f"Found existing product SKU '{sku}' with ID {product_id}")
-                                            
-                                            # Small delay
-                                            import time
-                                            time.sleep(0.1)
-                                            
-                                            # Update builder's preloaded_products so it can be found immediately
-                                            sku_clean = sku.strip()
-                                            builder.preloaded_products[sku_clean] = existing_product
-                                            builder.preloaded_products[sku_clean.upper()] = existing_product
-                                            builder.preloaded_products[sku_clean.lower()] = existing_product
-                                            # Clear any cached None entries and update cache with the existing product
-                                            if sku_clean in builder._product_cache:
-                                                del builder._product_cache[sku_clean]
-                                            if sku in builder._product_cache:
-                                                del builder._product_cache[sku]
-                                            builder._product_cache[sku_clean] = existing_product
-                                            
-                                            # Force commit
-                                            db.session.commit()
-                                            
-                                            # Track product ID for cache refresh (even if already existed)
-                                            auto_created_product_ids.append(product_id_uuid)
-                                            
-                                            # Update matching details
-                                            for p in matching_details['products']:
-                                                if p.get('sku') == sku:
-                                                    p['found'] = True
-                                                    p['cin7_id'] = product_id
-                                                    p['cin7_name'] = existing_product.get('Name')
-                                                    p['auto_created'] = False  # Not auto-created, already existed
-                                                    break
-                                        except (ValueError, AttributeError):
-                                            logger.error(f"Invalid product ID format: {product_id}")
+                                        existing_product = products[0]
+                                        product_id = existing_product.get('ID')
+                                        if product_id:
+                                            try:
+                                                product_id_uuid = uuid.UUID(str(product_id))
+                                                # Refresh product cache with existing product
+                                                from routes.sales import refresh_single_product_cache
+                                                refresh_single_product_cache(credential_id_for_logging, product_id_uuid, sku, existing_product, is_new=False)
+                                                logger.info(f"Found existing product SKU '{sku}' with ID {product_id}")
+                                                
+                                                # Small delay
+                                                import time
+                                                time.sleep(0.1)
+                                                
+                                                # Update builder's preloaded_products so it can be found immediately
+                                                sku_clean = sku.strip()
+                                                builder.preloaded_products[sku_clean] = existing_product
+                                                builder.preloaded_products[sku_clean.upper()] = existing_product
+                                                builder.preloaded_products[sku_clean.lower()] = existing_product
+                                                # Clear any cached None entries and update cache with the existing product
+                                                if sku_clean in builder._product_cache:
+                                                    del builder._product_cache[sku_clean]
+                                                if sku in builder._product_cache:
+                                                    del builder._product_cache[sku]
+                                                builder._product_cache[sku_clean] = existing_product
+                                                
+                                                # Force commit
+                                                db.session.commit()
+                                                
+                                                # Track product ID for cache refresh (even if already existed)
+                                                auto_created_product_ids.append(product_id_uuid)
+                                                
+                                                # Update matching details
+                                                for p in matching_details['products']:
+                                                    if p.get('sku') == sku:
+                                                        p['found'] = True
+                                                        p['cin7_id'] = product_id
+                                                        p['cin7_name'] = existing_product.get('Name')
+                                                        p['auto_created'] = False  # Not auto-created, already existed
+                                                        break
+                                            except (ValueError, AttributeError):
+                                                logger.error(f"Invalid product ID format: {product_id}")
                                 else:
                                     logger.warning(f"Product SKU '{sku}' reported as existing but not found in search")
                             except Exception as e:
