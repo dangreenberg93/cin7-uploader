@@ -9,7 +9,7 @@ import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Switch } from './ui/switch';
 import { Badge } from './ui/badge';
-import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, RotateCcw } from 'lucide-react';
 
 const Cin7Settings = () => {
   const { selectedClientId, selectedClient } = useClient();
@@ -338,6 +338,24 @@ const Cin7Settings = () => {
     }
   };
 
+  const handleReset = () => {
+    // Reset all fields to their original values
+    setDefaultStatus(originalValues.defaultStatus);
+    setSaleType(originalValues.saleType);
+    setTaxRule(originalValues.taxRule);
+    setDefaultLocation(originalValues.defaultLocation || undefined);
+    setCustomerAccountReceivable(originalValues.customerAccountReceivable || undefined);
+    setCustomerRevenueAccount(originalValues.customerRevenueAccount || undefined);
+    setCustomerTaxRule(originalValues.customerTaxRule || undefined);
+    setCustomerAttributeSet(originalValues.customerAttributeSet || undefined);
+    setAutoCreateCustomersProducts(originalValues.autoCreateCustomersProducts);
+    setProductCostingMethod(originalValues.productCostingMethod);
+    setProductDefaultPriceTier(originalValues.productDefaultPriceTier);
+    setProductDefaultPrice(originalValues.productDefaultPrice);
+    setProductCurrency(originalValues.productCurrency);
+    toast.success('Settings reset to original values');
+  };
+
   // Check if customer defaults are set up (required for auto-create)
   const isCustomerDefaultsSetUp = useMemo(() => {
     return !!(
@@ -368,6 +386,46 @@ const Cin7Settings = () => {
     productDefaultPrice !== originalValues.productDefaultPrice ||
     productCurrency !== originalValues.productCurrency;
 
+  // Helper functions to check if individual fields have changed
+  const isFieldChanged = (fieldName) => {
+    switch (fieldName) {
+      case 'defaultStatus':
+        return defaultStatus !== originalValues.defaultStatus;
+      case 'saleType':
+        return saleType !== originalValues.saleType;
+      case 'taxRule':
+        return taxRule !== originalValues.taxRule;
+      case 'defaultLocation':
+        return (defaultLocation || '') !== originalValues.defaultLocation;
+      case 'customerAccountReceivable':
+        return (customerAccountReceivable || '') !== originalValues.customerAccountReceivable;
+      case 'customerRevenueAccount':
+        return (customerRevenueAccount || '') !== originalValues.customerRevenueAccount;
+      case 'customerTaxRule':
+        return (customerTaxRule || '') !== originalValues.customerTaxRule;
+      case 'customerAttributeSet':
+        return (customerAttributeSet || '') !== originalValues.customerAttributeSet;
+      case 'autoCreateCustomersProducts':
+        return autoCreateCustomersProducts !== originalValues.autoCreateCustomersProducts;
+      case 'productCostingMethod':
+        return productCostingMethod !== originalValues.productCostingMethod;
+      case 'productDefaultPriceTier':
+        return productDefaultPriceTier !== originalValues.productDefaultPriceTier;
+      case 'productDefaultPrice':
+        return productDefaultPrice !== originalValues.productDefaultPrice;
+      case 'productCurrency':
+        return productCurrency !== originalValues.productCurrency;
+      default:
+        return false;
+    }
+  };
+
+  // Helper function to get className for changed fields (reusable style)
+  const getChangedFieldClassName = (fieldName, baseClassName = '') => {
+    const changedClass = isFieldChanged(fieldName) ? '!border-blue-500' : '';
+    return `${baseClassName} ${changedClass}`.trim();
+  };
+
   if (!selectedClientId) {
     return (
       <div className="p-6">
@@ -391,20 +449,31 @@ const Cin7Settings = () => {
               Configure order defaults for {selectedClient?.name}
             </p>
           </div>
-          <Button
-            onClick={handleSave}
-            disabled={saving || !hasChanges}
-            className="h-8 text-xs"
-          >
-            {saving ? (
-              <>
-                <Loader2 className="w-3 h-3 mr-2 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              'Save All Settings'
-            )}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={handleReset}
+              disabled={!hasChanges}
+              variant="outline"
+              className="h-8 text-xs"
+            >
+              <RotateCcw className="w-3 h-3 mr-2" />
+              Reset
+            </Button>
+            <Button
+              onClick={handleSave}
+              disabled={saving || !hasChanges}
+              className="h-8 text-xs"
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="w-3 h-3 mr-2 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                'Save All Settings'
+              )}
+            </Button>
+          </div>
         </div>
 
         {loading ? (
@@ -425,7 +494,7 @@ const Cin7Settings = () => {
                 <div>
                   <Label htmlFor="default-status" className="text-xs">Default Status *</Label>
                   <Select value={defaultStatus} onValueChange={setDefaultStatus}>
-                    <SelectTrigger id="default-status" className="h-8 text-xs w-full">
+                    <SelectTrigger id="default-status" className={getChangedFieldClassName('defaultStatus', 'h-8 text-xs w-full')}>
                       <SelectValue placeholder="Select default status" />
                     </SelectTrigger>
                     <SelectContent>
@@ -442,7 +511,7 @@ const Cin7Settings = () => {
                 <div>
                   <Label htmlFor="sale-type" className="text-xs">Sale Type</Label>
                   <Select value={saleType} onValueChange={setSaleType}>
-                    <SelectTrigger id="sale-type" className="h-8 text-xs w-full">
+                    <SelectTrigger id="sale-type" className={getChangedFieldClassName('saleType', 'h-8 text-xs w-full')}>
                       <SelectValue placeholder="Select sale type" />
                     </SelectTrigger>
                     <SelectContent>
@@ -459,7 +528,7 @@ const Cin7Settings = () => {
                   <Label htmlFor="tax-rule" className="text-xs">Tax Rule</Label>
                   <Input
                     id="tax-rule"
-                    className="h-8 text-xs w-full"
+                    className={getChangedFieldClassName('taxRule', 'h-8 text-xs w-full')}
                     value={taxRule}
                     onChange={(e) => setTaxRule(e.target.value)}
                     placeholder="e.g., TaxExclusive, TaxInclusive, etc."
@@ -478,7 +547,7 @@ const Cin7Settings = () => {
                     </div>
                   ) : (
                     <Select value={defaultLocation} onValueChange={(value) => setDefaultLocation(value)}>
-                      <SelectTrigger id="default-location" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                      <SelectTrigger id="default-location" className={getChangedFieldClassName('defaultLocation', 'h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0')}>
                         <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
                       </SelectTrigger>
                       <SelectContent>
@@ -521,11 +590,13 @@ const Cin7Settings = () => {
               </div>
               <div className="flex items-center gap-2">
                 <Label htmlFor="auto-create-customers-products" className="text-xs">Auto-create</Label>
-                <Switch
-                  id="auto-create-customers-products"
-                  checked={autoCreateCustomersProducts}
-                  onCheckedChange={setAutoCreateCustomersProducts}
-                />
+                <div className={isFieldChanged('autoCreateCustomersProducts') ? 'p-1 rounded-full border border-blue-500' : ''}>
+                  <Switch
+                    id="auto-create-customers-products"
+                    checked={autoCreateCustomersProducts}
+                    onCheckedChange={setAutoCreateCustomersProducts}
+                  />
+                </div>
               </div>
             </div>
             <CardDescription className="text-xs mt-1">
@@ -558,7 +629,7 @@ const Cin7Settings = () => {
                       </div>
                     ) : (
                       <Select value={customerAccountReceivable} onValueChange={(value) => setCustomerAccountReceivable(value)}>
-                        <SelectTrigger id="customer-account-receivable" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                        <SelectTrigger id="customer-account-receivable" className={getChangedFieldClassName('customerAccountReceivable', 'h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0')}>
                           <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
                         </SelectTrigger>
                         <SelectContent>
@@ -584,7 +655,7 @@ const Cin7Settings = () => {
                       </div>
                     ) : (
                       <Select value={customerRevenueAccount} onValueChange={(value) => setCustomerRevenueAccount(value)}>
-                        <SelectTrigger id="customer-revenue-account" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                        <SelectTrigger id="customer-revenue-account" className={getChangedFieldClassName('customerRevenueAccount', 'h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0')}>
                           <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
                         </SelectTrigger>
                         <SelectContent>
@@ -610,7 +681,7 @@ const Cin7Settings = () => {
                       </div>
                     ) : (
                       <Select value={customerTaxRule} onValueChange={(value) => setCustomerTaxRule(value)}>
-                        <SelectTrigger id="customer-tax-rule" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                        <SelectTrigger id="customer-tax-rule" className={getChangedFieldClassName('customerTaxRule', 'h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0')}>
                           <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
                         </SelectTrigger>
                         <SelectContent>
@@ -636,7 +707,7 @@ const Cin7Settings = () => {
                       </div>
                     ) : (
                       <Select value={customerAttributeSet} onValueChange={(value) => setCustomerAttributeSet(value)}>
-                        <SelectTrigger id="customer-attribute-set" className="h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0">
+                        <SelectTrigger id="customer-attribute-set" className={getChangedFieldClassName('customerAttributeSet', 'h-8 text-xs w-full [&:not([data-placeholder])>span]:!bg-transparent [&:not([data-placeholder])>span]:!px-0 [&:not([data-placeholder])>span]:!py-0 [&:not([data-placeholder])>span]:!rounded-none [&:not([data-placeholder])>span]:!font-normal [&:not([data-placeholder])>span]:!mr-0')}>
                           <SelectValue placeholder="Select an option" className="!bg-transparent !px-0 !py-0 !rounded-none !font-normal" />
                         </SelectTrigger>
                         <SelectContent>
@@ -662,7 +733,7 @@ const Cin7Settings = () => {
                       Costing Method <span className="text-red-500">*</span>
                     </Label>
                     <Select value={productCostingMethod} onValueChange={setProductCostingMethod}>
-                      <SelectTrigger id="product-costing-method" className="h-8 text-xs w-full">
+                      <SelectTrigger id="product-costing-method" className={getChangedFieldClassName('productCostingMethod', 'h-8 text-xs w-full')}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -681,7 +752,7 @@ const Cin7Settings = () => {
                     <Label htmlFor="product-price-tier" className="text-xs">Default Price Tier</Label>
                     <Input
                       id="product-price-tier"
-                      className="h-8 text-xs w-full"
+                      className={getChangedFieldClassName('productDefaultPriceTier', 'h-8 text-xs w-full')}
                       value={productDefaultPriceTier}
                       onChange={(e) => setProductDefaultPriceTier(e.target.value)}
                       placeholder="Tier 1"
@@ -697,7 +768,7 @@ const Cin7Settings = () => {
                       id="product-default-price"
                       type="number"
                       step="0.01"
-                      className="h-8 text-xs w-full"
+                      className={getChangedFieldClassName('productDefaultPrice', 'h-8 text-xs w-full')}
                       value={productDefaultPrice}
                       onChange={(e) => setProductDefaultPrice(parseFloat(e.target.value) || 0.0)}
                       placeholder="0.00"
@@ -711,7 +782,7 @@ const Cin7Settings = () => {
                     <Label htmlFor="product-currency" className="text-xs">Currency</Label>
                     <Input
                       id="product-currency"
-                      className="h-8 text-xs w-full"
+                      className={getChangedFieldClassName('productCurrency', 'h-8 text-xs w-full')}
                       value={productCurrency}
                       onChange={(e) => setProductCurrency(e.target.value)}
                       placeholder="USD"

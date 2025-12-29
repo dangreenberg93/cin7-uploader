@@ -198,7 +198,8 @@ function AppHeaderContent({ user }) {
           )}
         </>
       )}
-      {((location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/data') || isAdmin) && !showActivityLog && (
+      {/* Temporarily disabled activity log button */}
+      {/* {((location.pathname === '/' || location.pathname === '/queue' || location.pathname === '/data') || isAdmin) && !showActivityLog && (
         <Button
           variant="ghost"
           size="icon"
@@ -208,7 +209,7 @@ function AppHeaderContent({ user }) {
           <ScrollText className="h-4 w-4" />
           <span className="sr-only">Show Activity Log</span>
         </Button>
-      )}
+      )} */}
     </header>
   );
 }

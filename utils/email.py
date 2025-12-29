@@ -139,7 +139,6 @@ def send_password_reset_email(email, reset_token):
         </div>
         
         <div class="footer">
-            <p class="footer-text">This link will expire in 1 hour. If you didn't request this, please ignore this email.</p>
         </div>
     </div>
 </body>

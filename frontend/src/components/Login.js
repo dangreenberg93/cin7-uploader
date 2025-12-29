@@ -28,7 +28,6 @@ function Login({ onLogin }) {
       if (response.data.token && response.data.user) {
         localStorage.setItem('token', response.data.token);
         onLogin(response.data.user, response.data.token);
-        toast.success('Logged in successfully!');
       }
     } catch (err) {
       console.error('Login error:', err);

@@ -83,6 +83,12 @@ const QueueView = () => {
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
   const completedOrdersScrollRef = useRef(null);
+  const [uploadConfirmModalOpen, setUploadConfirmModalOpen] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null);
+  const [autoCreateEnabled, setAutoCreateEnabled] = useState(false);
+  const [loadingAutoCreateStatus, setLoadingAutoCreateStatus] = useState(false);
+  const [csvRowCount, setCsvRowCount] = useState(0);
+  const [csvUniqueOrderCount, setCsvUniqueOrderCount] = useState(0);
 
   // Filter and sort uploads
   const filteredAndSortedUploads = useMemo(() => {
@@ -1145,10 +1151,156 @@ const QueueView = () => {
     }
   };
 
+  const parseCsvForCounts = (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const text = e.target.result;
+          const lines = text.split('\n').filter(line => line.trim().length > 0);
+          
+          if (lines.length < 2) {
+            resolve({ rowCount: 0, uniqueOrderCount: 0 });
+            return;
+          }
+
+          // Parse header
+          const headerLine = lines[0];
+          const delimiter = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
+          
+          // Parse header with proper quote handling
+          const parseCsvLine = (line, delim) => {
+            const values = [];
+            let current = '';
+            let inQuotes = false;
+            
+            for (let j = 0; j < line.length; j++) {
+              const char = line[j];
+              if (char === '"') {
+                inQuotes = !inQuotes;
+              } else if (char === delim && !inQuotes) {
+                values.push(current.trim().replace(/^"|"$/g, ''));
+                current = '';
+              } else {
+                current += char;
+              }
+            }
+            values.push(current.trim().replace(/^"|"$/g, '')); // Add last value
+            return values;
+          };
+          
+          const headers = parseCsvLine(headerLine, delimiter);
+          
+          // Find order identifier column (SaleOrderNumber, InvoiceNumber, or common variations)
+          const orderColumnNames = [
+            'SaleOrderNumber', 'saleordernumber', 'Sale Order Number', 'Sale Order #',
+            'InvoiceNumber', 'invoicenumber', 'Invoice Number', 'Invoice #',
+            'OrderNumber', 'ordernumber', 'Order Number', 'Order #',
+            'PO', 'PO Number', 'PO #', 'PONumber', 'ponumber',
+            'Order ID', 'OrderID', 'orderid'
+          ];
+          
+          let orderColumnIndex = -1;
+          for (let i = 0; i < headers.length; i++) {
+            const headerLower = headers[i].toLowerCase().trim();
+            if (orderColumnNames.some(name => headerLower === name.toLowerCase() || headerLower.includes(name.toLowerCase()))) {
+              orderColumnIndex = i;
+              break;
+            }
+          }
+
+          // Parse rows (skip header)
+          const rows = [];
+          const orderSet = new Set();
+          
+          for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            
+            // Parse CSV line with proper quote handling
+            const values = parseCsvLine(line, delimiter);
+            
+            // Check if row has enough data (at least 3 non-empty values)
+            const nonEmptyCount = values.filter(v => v && v.trim().length > 0).length;
+            if (nonEmptyCount >= 3) {
+              rows.push(values);
+              
+              // Extract order identifier if column found
+              if (orderColumnIndex >= 0 && orderColumnIndex < values.length) {
+                const orderValue = values[orderColumnIndex]?.trim();
+                if (orderValue) {
+                  orderSet.add(orderValue);
+                }
+              }
+            }
+          }
+
+          const rowCount = rows.length;
+          const uniqueOrderCount = orderColumnIndex >= 0 ? orderSet.size : 0;
+          
+          resolve({ rowCount, uniqueOrderCount });
+        } catch (error) {
+          console.error('Error parsing CSV:', error);
+          resolve({ rowCount: 0, uniqueOrderCount: 0 });
+        }
+      };
+      
+      reader.onerror = () => {
+        resolve({ rowCount: 0, uniqueOrderCount: 0 });
+      };
+      
+      reader.readAsText(file);
+    });
+  };
+
+  const checkAutoCreateAndShowModal = async (file) => {
+    if (!selectedClientId) {
+      toast.error('Please select a client first');
+      return;
+    }
+
+    if (!file) {
+      return;
+    }
+
+    // Validate file type
+    if (!file.name.endsWith('.csv')) {
+      toast.error('Please upload a CSV file');
+      return;
+    }
+
+    setLoadingAutoCreateStatus(true);
+    try {
+      // Parse CSV for counts
+      const { rowCount, uniqueOrderCount } = await parseCsvForCounts(file);
+      setCsvRowCount(rowCount);
+      setCsvUniqueOrderCount(uniqueOrderCount);
+      
+      // Fetch auto-create status
+      const response = await axios.get(`/credentials/clients/${selectedClientId}`);
+      const credentials = response.data;
+      const isAutoCreateEnabled = credentials.auto_create_customers_products === true || 
+                                   credentials.auto_create_customers_products === 'true' || 
+                                   credentials.auto_create_customers_products === 1;
+      
+      setAutoCreateEnabled(isAutoCreateEnabled);
+      setPendingFile(file);
+      setUploadConfirmModalOpen(true);
+    } catch (error) {
+      console.error('Error fetching auto-create status:', error);
+      // Still show modal even if we can't fetch status
+      setAutoCreateEnabled(false);
+      setPendingFile(file);
+      setUploadConfirmModalOpen(true);
+    } finally {
+      setLoadingAutoCreateStatus(false);
+    }
+  };
+
   const handleFileSelect = (e) => {
     const file = e.target.files?.[0];
     if (file) {
-      handleFileUpload(file);
+      checkAutoCreateAndShowModal(file);
     }
   };
 
@@ -1157,7 +1309,27 @@ const QueueView = () => {
     e.stopPropagation();
     const file = e.dataTransfer.files?.[0];
     if (file) {
-      handleFileUpload(file);
+      checkAutoCreateAndShowModal(file);
+    }
+  };
+
+  const handleConfirmUpload = () => {
+    if (pendingFile) {
+      setUploadConfirmModalOpen(false);
+      handleFileUpload(pendingFile);
+      setPendingFile(null);
+    }
+  };
+
+  const handleCancelUpload = () => {
+    setUploadConfirmModalOpen(false);
+    setPendingFile(null);
+    setAutoCreateEnabled(false);
+    setCsvRowCount(0);
+    setCsvUniqueOrderCount(0);
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
 
@@ -2554,14 +2726,14 @@ const QueueView = () => {
                             }}
                           >
                               {reviewFilterTab === 'needs-review' && (
-                                <TableCell onClick={(e) => { e.stopPropagation(); }} className="cursor-default py-1.5" style={{ height: 'auto' }}>
+                                <TableCell onClick={(e) => { e.stopPropagation(); }} className="text-xs">
                                   <Checkbox
                                     checked={isSelected}
                                     onCheckedChange={(checked) => toggleSelectOrder(order.id, checked)}
                                   />
                                 </TableCell>
                               )}
-                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center py-1.5" style={{ height: 'auto' }}>
+                              <TableCell onClick={(e) => e.stopPropagation()} className="cursor-default text-center">
                                 <button
                                   onClick={() => markOrderAsReviewed(order.id, !order.reviewed)}
                                   className="hover:opacity-80 transition-opacity inline-flex items-center justify-center"
@@ -2576,13 +2748,13 @@ const QueueView = () => {
                                   )}
                                 </button>
                               </TableCell>
-                              <TableCell className="min-w-[120px] py-1.5" style={{ height: 'auto' }}>
+                              <TableCell className="text-xs min-w-[120px]">
                                 <span className="font-medium">{order.order_key}</span>
                               </TableCell>
-                              <TableCell className="min-w-[180px] whitespace-nowrap py-1.5" style={{ height: 'auto' }}>
+                              <TableCell className="text-xs whitespace-nowrap min-w-[180px]">
                                 {customerName}
                               </TableCell>
-                              <TableCell className="min-w-[120px] py-1.5" style={{ height: 'auto' }} onClick={(e) => e.stopPropagation()}>
+                              <TableCell className="text-xs min-w-[120px]" onClick={(e) => e.stopPropagation()}>
                                 {order.sale_id ? (
                                   <a
                                     href={`https://inventory.dearsystems.com/Sale#${order.sale_id}`}
@@ -2597,10 +2769,10 @@ const QueueView = () => {
                                   poNumber
                                 )}
                               </TableCell>
-                              <TableCell className="min-w-[110px] py-1.5" style={{ height: 'auto' }}>
+                              <TableCell className="text-xs min-w-[110px]">
                                 {formatDate(order.processed_at)}
                               </TableCell>
-                              <TableCell className="text-xs whitespace-nowrap min-w-[200px] py-1.5" style={{ height: 'auto' }}>
+                              <TableCell className="text-xs whitespace-nowrap min-w-[200px]">
                                 {order.upload ? (
                                   <div>
                                     <div className="font-medium">{order.upload.filename}</div>
@@ -2609,7 +2781,7 @@ const QueueView = () => {
                                 ) : '-'}
                               </TableCell>
                               <TableCell className="w-auto py-1.5 sticky right-0 bg-white group-hover:bg-muted/50 z-10 border-l" style={{ height: 'auto', borderLeft: '1px solid hsl(var(--border))' }} onClick={(e) => e.stopPropagation()}>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 justify-center">
                                   <span
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -3278,6 +3450,89 @@ const QueueView = () => {
                 : bulkReviewIndex < bulkReviewOrders.length - 1 
                   ? 'Next' 
                   : 'Finish'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Upload Confirmation Modal */}
+      <Dialog open={uploadConfirmModalOpen} onOpenChange={setUploadConfirmModalOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Confirm File Upload</DialogTitle>
+            <DialogDescription>
+              Please review the upload details before proceeding.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            {loadingAutoCreateStatus ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                <span className="text-sm text-muted-foreground">Checking settings...</span>
+              </div>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">File Name</Label>
+                  <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+                    <FileText className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm">{pendingFile?.name || 'Unknown'}</span>
+                  </div>
+                </div>
+                
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">Row Count</Label>
+                  <div className="p-2 bg-muted rounded-md">
+                    <span className="text-sm font-medium">
+                      {csvRowCount.toLocaleString()} {csvRowCount === 1 ? 'row' : 'rows'}
+                    </span>
+                  </div>
+                </div>
+                
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">Unique Orders</Label>
+                  <div className="p-2 bg-muted rounded-md">
+                    <span className="text-sm font-medium">
+                      {csvUniqueOrderCount > 0 ? (
+                        <>{csvUniqueOrderCount.toLocaleString()} {csvUniqueOrderCount === 1 ? 'order' : 'orders'}</>
+                      ) : (
+                        <span className="text-muted-foreground">Unable to detect order column</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                {autoCreateEnabled && (
+                  <div className="p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-md">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-amber-900 dark:text-amber-100">
+                          Auto-Create is Active
+                        </p>
+                        <p className="text-xs text-amber-700 dark:text-amber-300">
+                          Customers and products that don't exist in Cin7 will be automatically created during processing.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={handleCancelUpload} disabled={loadingAutoCreateStatus}>
+              Cancel
+            </Button>
+            <Button onClick={handleConfirmUpload} disabled={loadingAutoCreateStatus || !pendingFile}>
+              {loadingAutoCreateStatus ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Loading...
+                </>
+              ) : (
+                'Confirm & Upload'
+              )}
             </Button>
           </div>
         </DialogContent>
