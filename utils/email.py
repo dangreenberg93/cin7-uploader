@@ -157,7 +157,7 @@ def send_password_reset_email(email, reset_token):
 <body>
     <div class="container" style="text-align: left;">
         <div class="header" style="text-align: left;">
-            <img src="{logo_url}" alt="Cin7 Uploader" class="logo" style="max-width: 120px; width: 120px; height: auto; margin-bottom: 24px; display: block; border: 0; outline: none; text-decoration: none;" />
+            <img src="{logo_url}" alt="Cin7 Uploader" class="logo" style="max-width: 200px; width: 200px; height: auto; margin-bottom: 24px; display: block; border: 0; outline: none; text-decoration: none;" />
             <h1 class="title" style="text-align: left;">Password Reset Request</h1>
             <p class="subtitle" style="text-align: left;">Cin7 Uploader</p>
         </div>
