@@ -133,9 +133,8 @@ def create_app(config_name=None):
         index_path = os.path.join(app.static_folder, 'index.html')
         print(f"Checking for index.html at: {index_path}, exists: {os.path.exists(index_path)}")
         if os.path.exists(index_path):
-            from flask import send_from_directory
             try:
-                return send_from_directory(app.static_folder, 'index.html')
+                return app.send_static_file('index.html')
             except Exception as e:
                 print(f"Error serving index.html: {e}")
                 from flask import jsonify
@@ -175,10 +174,9 @@ def create_app(config_name=None):
         index_path = os.path.join(app.static_folder, 'index.html')
         print(f"Checking index.html at: {index_path}, exists: {os.path.exists(index_path)}")
         if os.path.exists(index_path):
-            from flask import send_from_directory
             print(f"Serving index.html for path: '{path}', static_folder: {app.static_folder}")
             try:
-                return send_from_directory(app.static_folder, 'index.html')
+                return app.send_static_file('index.html')
             except Exception as e:
                 print(f"Exception serving index.html: {e}")
                 raise

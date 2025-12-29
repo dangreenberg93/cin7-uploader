@@ -23,6 +23,39 @@ from routes.auth import User
 webhooks_bp = Blueprint('webhooks', __name__)
 logger = logging.getLogger(__name__)
 
+# Helper function for debug logging (works in both dev and production)
+def debug_log(session_id, run_id, hypothesis_id, location, message, data):
+    """
+    Debug logging helper that uses proper logging and optionally writes to file.
+    In production, logs go to Cloud Run logs. In dev, can also write to file if configured.
+    """
+    import time
+    log_data = {
+        "sessionId": session_id,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000)
+    }
+    
+    # Always use proper logging (works in production via Cloud Run logs)
+    logger.debug(f"[DEBUG] {json.dumps(log_data)}")
+    
+    # Optionally write to file if DEBUG_LOG_FILE env var is set (for local dev)
+    debug_log_file = os.environ.get('DEBUG_LOG_FILE')
+    if debug_log_file:
+        try:
+            # Ensure directory exists
+            log_dir = os.path.dirname(debug_log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            with open(debug_log_file, 'a') as f:
+                f.write(json.dumps(log_data) + '\n')
+        except Exception:
+            pass  # Ignore file write errors
+
 # Global event queue for Server-Sent Events (SSE)
 # Thread-safe queue to broadcast upload status updates to connected clients
 _event_queue = queue.Queue()
@@ -2837,13 +2870,17 @@ def process_webhook_csv(
             logger.info(f"Auto-creating product with SKU '{sku}'...")
             
             # #region agent log
-            import json
             existing_before = CachedProduct.query.filter_by(
                 client_erp_credentials_id=credential_id_for_logging,
                 sku=sku
             ).first()
-            with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H2","location":"routes/webhooks.py:2268","message":"Before product creation attempt","data":{"sku":sku,"exists_in_cache":existing_before is not None,"existing_is_new":existing_before.is_new if existing_before else None,"existing_created_via_auto_create":existing_before.created_via_auto_create if existing_before else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            debug_log("debug-product-flags", "run1", "H2", "routes/webhooks.py:process_webhook_csv",
+                      "Before product creation attempt", {
+                          "sku": sku,
+                          "exists_in_cache": existing_before is not None,
+                          "existing_is_new": existing_before.is_new if existing_before else None,
+                          "existing_created_via_auto_create": existing_before.created_via_auto_create if existing_before else None
+                      })
             # #endregion
             
             try:
@@ -2866,9 +2903,13 @@ def process_webhook_csv(
                 create_success, create_message, create_response = api_client.create_product(product_payload)
                 
                 # #region agent log
-                import json
-                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H5","location":"routes/webhooks.py:2298","message":"Product creation API call result","data":{"sku":sku,"create_success":create_success,"create_message":str(create_message)[:200] if create_message else None,"has_response":create_response is not None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                debug_log("debug-product-flags", "run1", "H5", "routes/webhooks.py:process_webhook_csv",
+                          "Product creation API call result", {
+                              "sku": sku,
+                              "create_success": create_success,
+                              "create_message": str(create_message)[:200] if create_message else None,
+                              "has_response": create_response is not None
+                          })
                 # #endregion
                 
                 if create_success and create_response:
@@ -2882,8 +2923,12 @@ def process_webhook_csv(
                             product_data = create_response['ProductList'][0]
                     
                     # #region agent log
-                    with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                        f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run2","hypothesisId":"H1","location":"routes/webhooks.py:2315","message":"After product_data extraction","data":{"sku":sku,"product_data_is_none":product_data is None,"has_id":product_data.get('ID') if product_data else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    debug_log("debug-product-flags", "run2", "H1", "routes/webhooks.py:process_webhook_csv",
+                              "After product_data extraction", {
+                                  "sku": sku,
+                                  "product_data_is_none": product_data is None,
+                                  "has_id": product_data.get('ID') if product_data else None
+                              })
                     # #endregion
                     
                     if product_data:
@@ -2894,8 +2939,9 @@ def process_webhook_csv(
                                 from routes.sales import refresh_single_product_cache
                                 
                                 # #region agent log
-                                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run2","hypothesisId":"H1","location":"routes/webhooks.py:2321","message":"About to call refresh_single_product_cache with is_new=True","data":{"sku":sku,"product_id":str(product_id_uuid)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                                debug_log("debug-product-flags", "run2", "H1", "routes/webhooks.py:process_webhook_csv",
+                                          "About to call refresh_single_product_cache with is_new=True",
+                                          {"sku": sku, "product_id": str(product_id_uuid)})
                                 # #endregion
                                 
                                 logger.info(f"Calling refresh_single_product_cache for SKU '{sku}' with is_new=True (main path)")

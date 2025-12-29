@@ -21,6 +21,40 @@ sales_bp = Blueprint('sales', __name__)
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cin7_uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Helper function for debug logging (works in both dev and production)
+def debug_log(session_id, run_id, hypothesis_id, location, message, data):
+    """
+    Debug logging helper that uses proper logging and optionally writes to file.
+    In production, logs go to Cloud Run logs. In dev, can also write to file if configured.
+    """
+    import time
+    log_data = {
+        "sessionId": session_id,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000)
+    }
+    
+    # Always use proper logging (works in production via Cloud Run logs)
+    logger = logging.getLogger(__name__)
+    logger.debug(f"[DEBUG] {json.dumps(log_data)}")
+    
+    # Optionally write to file if DEBUG_LOG_FILE env var is set (for local dev)
+    debug_log_file = os.environ.get('DEBUG_LOG_FILE')
+    if debug_log_file:
+        try:
+            # Ensure directory exists
+            log_dir = os.path.dirname(debug_log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            with open(debug_log_file, 'a') as f:
+                f.write(json.dumps(log_data) + '\n')
+        except Exception:
+            pass  # Ignore file write errors
+
 # In-memory storage for upload sessions (in production, use Redis or database)
 upload_sessions = {}
 
@@ -2093,9 +2127,8 @@ def refresh_single_product_cache(client_erp_credentials_id: uuid.UUID, product_i
         is_new: Whether to mark as new (for auto-created products)
     """
     # #region agent log
-    import json
-    with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2069","message":"refresh_single_product_cache entry","data":{"sku":sku,"product_id":str(product_id),"is_new":is_new},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+    debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache", 
+              "refresh_single_product_cache entry", {"sku": sku, "product_id": str(product_id), "is_new": is_new})
     # #endregion
     
     try:
@@ -2105,16 +2138,27 @@ def refresh_single_product_cache(client_erp_credentials_id: uuid.UUID, product_i
         ).first()
         
         # #region agent log
-        with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2084","message":"Product lookup result","data":{"sku":sku,"product_id":str(product_id),"existing_found":existing is not None,"existing_is_new":existing.is_new if existing else None,"existing_created_via_auto_create":existing.created_via_auto_create if existing else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+        debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                  "Product lookup result", {
+                      "sku": sku,
+                      "product_id": str(product_id),
+                      "existing_found": existing is not None,
+                      "existing_is_new": existing.is_new if existing else None,
+                      "existing_created_via_auto_create": existing.created_via_auto_create if existing else None
+                  })
         # #endregion
         
         if existing:
             # Update existing record
             # #region agent log
-            import json
-            with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2087","message":"Updating existing product record","data":{"sku":sku,"product_id":str(product_id),"is_new":is_new,"before_is_new":existing.is_new,"before_created_via_auto_create":existing.created_via_auto_create},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                      "Updating existing product record", {
+                          "sku": sku,
+                          "product_id": str(product_id),
+                          "is_new": is_new,
+                          "before_is_new": existing.is_new,
+                          "before_created_via_auto_create": existing.created_via_auto_create
+                      })
             # #endregion
             
             existing.sku = sku
@@ -2125,21 +2169,25 @@ def refresh_single_product_cache(client_erp_credentials_id: uuid.UUID, product_i
                 existing.created_via_auto_create = True
                 current_app.logger.info(f"Updated existing product cache for SKU '{sku}' (ID: {product_id}) - set is_new=True, created_via_auto_create=True")
                 # #region agent log
-                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2094","message":"Set flags on existing record","data":{"sku":sku,"product_id":str(product_id),"after_is_new":existing.is_new,"after_created_via_auto_create":existing.created_via_auto_create},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                          "Set flags on existing record", {
+                              "sku": sku,
+                              "product_id": str(product_id),
+                              "after_is_new": existing.is_new,
+                              "after_created_via_auto_create": existing.created_via_auto_create
+                          })
                 # #endregion
             else:
                 current_app.logger.debug(f"Updated existing product cache for SKU '{sku}' (ID: {product_id}) - flags unchanged")
                 # #region agent log
-                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2096","message":"Flags unchanged (is_new=False)","data":{"sku":sku,"product_id":str(product_id)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                          "Flags unchanged (is_new=False)", {"sku": sku, "product_id": str(product_id)})
                 # #endregion
         else:
             # Insert new record
             # #region agent log
-            import json
-            with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2098","message":"Creating new product record","data":{"sku":sku,"product_id":str(product_id),"is_new":is_new},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                      "Creating new product record", {"sku": sku, "product_id": str(product_id), "is_new": is_new})
             # #endregion
             
             cached = CachedProduct(
@@ -2155,26 +2203,31 @@ def refresh_single_product_cache(client_erp_credentials_id: uuid.UUID, product_i
             if is_new:
                 current_app.logger.info(f"Created new product cache for SKU '{sku}' (ID: {product_id}) - set is_new=True, created_via_auto_create=True")
                 # #region agent log
-                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2110","message":"New record created with flags","data":{"sku":sku,"product_id":str(product_id),"cached_is_new":cached.is_new,"cached_created_via_auto_create":cached.created_via_auto_create},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                          "New record created with flags", {
+                              "sku": sku,
+                              "product_id": str(product_id),
+                              "cached_is_new": cached.is_new,
+                              "cached_created_via_auto_create": cached.created_via_auto_create
+                          })
                 # #endregion
             else:
                 current_app.logger.debug(f"Created new product cache for SKU '{sku}' (ID: {product_id}) - flags not set")
                 # #region agent log
-                with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2112","message":"New record created without flags","data":{"sku":sku,"product_id":str(product_id)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                          "New record created without flags", {"sku": sku, "product_id": str(product_id)})
                 # #endregion
         
         # #region agent log
-        with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H4","location":"routes/sales.py:2114","message":"Before commit","data":{"sku":sku,"product_id":str(product_id),"is_new":is_new},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+        debug_log("debug-product-flags", "run1", "H4", "routes/sales.py:refresh_single_product_cache",
+                  "Before commit", {"sku": sku, "product_id": str(product_id), "is_new": is_new})
         # #endregion
         
         db.session.commit()
         
         # #region agent log
-        with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H4","location":"routes/sales.py:2116","message":"After commit","data":{"sku":sku,"product_id":str(product_id)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+        debug_log("debug-product-flags", "run1", "H4", "routes/sales.py:refresh_single_product_cache",
+                  "After commit", {"sku": sku, "product_id": str(product_id)})
         # #endregion
         
         # Verify the flags were set
@@ -2185,23 +2238,33 @@ def refresh_single_product_cache(client_erp_credentials_id: uuid.UUID, product_i
                 cin7_product_id=product_id
             ).first()
             # #region agent log
-            import json
-            with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2118","message":"Verification after commit","data":{"sku":sku,"product_id":str(product_id),"verify_found":verify is not None,"verify_is_new":verify.is_new if verify else None,"verify_created_via_auto_create":verify.created_via_auto_create if verify else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                      "Verification after commit", {
+                          "sku": sku,
+                          "product_id": str(product_id),
+                          "verify_found": verify is not None,
+                          "verify_is_new": verify.is_new if verify else None,
+                          "verify_created_via_auto_create": verify.created_via_auto_create if verify else None
+                      })
             # #endregion
             
             if verify:
                 if not verify.is_new or not verify.created_via_auto_create:
                     current_app.logger.warning(f"WARNING: Product cache flags not set correctly for SKU '{sku}' (ID: {product_id}) - is_new={verify.is_new}, created_via_auto_create={verify.created_via_auto_create}")
                     # #region agent log
-                    with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                        f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2124","message":"VERIFICATION FAILED - flags not set","data":{"sku":sku,"product_id":str(product_id),"is_new":verify.is_new,"created_via_auto_create":verify.created_via_auto_create},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                              "VERIFICATION FAILED - flags not set", {
+                                  "sku": sku,
+                                  "product_id": str(product_id),
+                                  "is_new": verify.is_new,
+                                  "created_via_auto_create": verify.created_via_auto_create
+                              })
                     # #endregion
                 else:
                     current_app.logger.info(f"Verified: Product cache flags set correctly for SKU '{sku}' (ID: {product_id})")
                     # #region agent log
-                    with open('/Users/dan/Documents/random-projects/cin7-uploader/cin7-uploader/.cursor/debug.log', 'a') as f:
-                        f.write(json.dumps({"sessionId":"debug-product-flags","runId":"run1","hypothesisId":"H1","location":"routes/sales.py:2126","message":"VERIFICATION SUCCESS - flags set correctly","data":{"sku":sku,"product_id":str(product_id)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                    debug_log("debug-product-flags", "run1", "H1", "routes/sales.py:refresh_single_product_cache",
+                              "VERIFICATION SUCCESS - flags set correctly", {"sku": sku, "product_id": str(product_id)})
                     # #endregion
     except Exception as e:
         db.session.rollback()
