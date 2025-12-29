@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { Button } from './ui/button';
@@ -19,11 +19,13 @@ const CsvMappingConfig = () => {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [mappingName, setMappingName] = useState('');
   const [columnMapping, setColumnMapping] = useState({});
+  const [customerCodeField, setCustomerCodeField] = useState('');
   const [isDefault, setIsDefault] = useState(false);
 
   // Cin7 field options
   // Note: CustomerID, CustomerCode, CustomerEmail, SaleOrderNumber, InvoiceNumber, Status, Location
   // are auto-generated or handled automatically via lookups, so they're not shown here
+  // Note: Tags and AdditionalAttribute1-10 are handled separately via customer code field selector
   const cin7Fields = [
     { value: 'CustomerName', label: 'Customer Name (Lookup)', category: 'Customer' },
     { value: 'CustomerReference', label: 'Customer Reference (PO)', category: 'Order' },
@@ -38,7 +40,21 @@ const CsvMappingConfig = () => {
     { value: 'Price', label: 'Price', category: 'Line Item', isCalculationField: true },
     { value: 'Discount', label: 'Discount', category: 'Line Item' },
     { value: 'Tax', label: 'Tax', category: 'Line Item' },
-    { value: 'AdditionalAttribute1', label: 'Additional Attribute 1 (Customer)', category: 'Customer' },
+  ];
+
+  // Customer code field options
+  const customerCodeFieldOptions = [
+    { value: 'Tags', label: 'Tags' },
+    { value: 'AdditionalAttribute1', label: 'Additional Attribute 1' },
+    { value: 'AdditionalAttribute2', label: 'Additional Attribute 2' },
+    { value: 'AdditionalAttribute3', label: 'Additional Attribute 3' },
+    { value: 'AdditionalAttribute4', label: 'Additional Attribute 4' },
+    { value: 'AdditionalAttribute5', label: 'Additional Attribute 5' },
+    { value: 'AdditionalAttribute6', label: 'Additional Attribute 6' },
+    { value: 'AdditionalAttribute7', label: 'Additional Attribute 7' },
+    { value: 'AdditionalAttribute8', label: 'Additional Attribute 8' },
+    { value: 'AdditionalAttribute9', label: 'Additional Attribute 9' },
+    { value: 'AdditionalAttribute10', label: 'Additional Attribute 10' },
   ];
 
   useEffect(() => {
@@ -68,6 +84,7 @@ const CsvMappingConfig = () => {
     setEditingMapping(null);
     setMappingName('');
     setColumnMapping({});
+    setCustomerCodeField('');
     setIsDefault(false);
     setIsDialogOpen(true);
   };
@@ -76,6 +93,8 @@ const CsvMappingConfig = () => {
     setEditingMapping(mapping);
     setMappingName(mapping.mapping_name);
     setColumnMapping(mapping.column_mapping || {});
+    // Extract customer_code_field from column_mapping (stored as _customer_code_field)
+    setCustomerCodeField(mapping.column_mapping?._customer_code_field || '');
     setIsDefault(mapping.is_default);
     setIsDialogOpen(true);
   };
@@ -120,10 +139,18 @@ const CsvMappingConfig = () => {
     }
 
     try {
+      // Store customer_code_field in column_mapping as a special key (only if set)
+      const columnMappingWithCodeField = {
+        ...columnMapping,
+      };
+      if (customerCodeField && customerCodeField.trim()) {
+        columnMappingWithCodeField._customer_code_field = customerCodeField;
+      }
+      
       const payload = {
         client_erp_credentials_id: selectedClientId,
         mapping_name: mappingName,
-        column_mapping: columnMapping,
+        column_mapping: columnMappingWithCodeField,
         is_default: isDefault
       };
 
@@ -149,13 +176,51 @@ const CsvMappingConfig = () => {
     }));
   };
 
-  const groupedFields = cin7Fields.reduce((acc, field) => {
-    if (!acc[field.category]) {
-      acc[field.category] = [];
+  // Build grouped fields, adding the selected customer code field to Customer section
+  const groupedFields = useMemo(() => {
+    const grouped = cin7Fields.reduce((acc, field) => {
+      if (!acc[field.category]) {
+        acc[field.category] = [];
+      }
+      acc[field.category].push(field);
+      return acc;
+    }, {});
+
+    // Add the selected customer code field to the Customer section (only if one is selected)
+    if (customerCodeField && customerCodeField.trim() && grouped['Customer']) {
+      const codeFieldOption = customerCodeFieldOptions.find(opt => opt.value === customerCodeField);
+      if (codeFieldOption) {
+        // Remove any existing customer code fields first (in case user changed selection)
+        grouped['Customer'] = grouped['Customer'].filter(f => 
+          !customerCodeFieldOptions.some(opt => opt.value === f.value)
+        );
+        // Add the selected one
+        grouped['Customer'].push({
+          value: customerCodeField,
+          label: `${codeFieldOption.label} (Customer Code)`,
+          category: 'Customer'
+        });
+      }
     }
-    acc[field.category].push(field);
-    return acc;
-  }, {});
+
+    return grouped;
+  }, [customerCodeField]);
+
+  // Add the selected customer code field to the Customer section
+  if (customerCodeField && groupedFields['Customer']) {
+    const codeFieldOption = customerCodeFieldOptions.find(opt => opt.value === customerCodeField);
+    if (codeFieldOption) {
+      // Check if it's already in the list (shouldn't be, but just in case)
+      const exists = groupedFields['Customer'].some(f => f.value === customerCodeField);
+      if (!exists) {
+        groupedFields['Customer'].push({
+          value: customerCodeField,
+          label: `${codeFieldOption.label} (Customer Code)`,
+          category: 'Customer'
+        });
+      }
+    }
+  }
 
   if (!selectedClientId) {
     return (
@@ -299,6 +364,29 @@ const CsvMappingConfig = () => {
               {Object.keys(groupedFields).map((category) => (
                 <div key={category} className="space-y-2">
                   <h4 className="text-xs font-semibold text-muted-foreground">{category}</h4>
+                  {category === 'Customer' && (
+                    <div className="space-y-2 pl-4 mb-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="customer-code-field-select" className="text-xs">Customer Code Field (Optional):</Label>
+                        <Select value={customerCodeField || 'none'} onValueChange={(value) => setCustomerCodeField(value === 'none' ? '' : value)}>
+                          <SelectTrigger id="customer-code-field-select" className="h-8 text-xs w-full max-w-xs">
+                            <SelectValue placeholder="None (match by name only)" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">None (match by name only)</SelectItem>
+                            {customerCodeFieldOptions.map(option => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          Optional: Select which Cin7 field to use for customer code matching. If not set, customers will only be matched by name.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   <div className="space-y-2 pl-4">
                     {groupedFields[category].map((field) => {
                       const hasQuantity = columnMapping['Quantity'] && columnMapping['Quantity'].trim() !== '';

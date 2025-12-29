@@ -1004,12 +1004,19 @@ def create_sales_orders():
                     if customer_name:
                         # Extract additional_attribute1 if available for proper cache key
                         additional_attribute1 = None
-                        if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                            attr_col = column_mapping['AdditionalAttribute1']
+                        # Get customer code field from column_mapping (optional - if not set, will match by name only)
+                        customer_code_field = column_mapping.get('_customer_code_field')
+                        customer_code_value = None
+                        if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                            attr_col = column_mapping[customer_code_field]
                             if attr_col in row_result['data'] and row_result['data'][attr_col]:
-                                additional_attribute1 = str(row_result['data'][attr_col]).strip()
+                                customer_code_value = str(row_result['data'][attr_col]).strip()
                         
-                        customer_data = builder._lookup_customer_by_name(customer_name, additional_attribute1=additional_attribute1)
+                        customer_data = builder._lookup_customer_by_name(
+                            customer_name, 
+                            customer_code_field=customer_code_field,
+                            customer_code_value=customer_code_value
+                        )
                         
                         # Auto-create customer if not found
                         if not customer_data:
@@ -1047,13 +1054,14 @@ def create_sales_orders():
                                 if settings.get('customer_attribute_set'):
                                     customer_payload['AttributeSet'] = settings['customer_attribute_set']
                                 
-                                # Add AdditionalAttribute1 from CSV if mapped
-                                if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                                    attr_col = column_mapping['AdditionalAttribute1']
+                                # Add customer code field from CSV if mapped (dynamically use the configured field)
+                                customer_code_field = column_mapping.get('_customer_code_field')
+                                if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                                    attr_col = column_mapping[customer_code_field]
                                     if attr_col in row_result['data']:
                                         attr_value = row_result['data'][attr_col]
                                         if attr_value and str(attr_value).strip():
-                                            customer_payload['AdditionalAttribute1'] = str(attr_value).strip()
+                                            customer_payload[customer_code_field] = str(attr_value).strip()
                                 
                                 # Create customer
                                 create_success, create_message, create_response = api_client.create_customer(customer_payload)
@@ -1311,11 +1319,18 @@ def create_sales_orders():
                 customer_name = str(row_result['data'][customer_name_col]).strip() if row_result['data'][customer_name_col] else None
                 if customer_name:
                     additional_attribute1 = None
-                    if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                        attr_col = column_mapping['AdditionalAttribute1']
+                    # Get customer code field from column_mapping (optional - if not set, will match by name only)
+                    customer_code_field = column_mapping.get('_customer_code_field')
+                    customer_code_value = None
+                    if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                        attr_col = column_mapping[customer_code_field]
                         if attr_col in row_result['data'] and row_result['data'][attr_col]:
-                            additional_attribute1 = str(row_result['data'][attr_col]).strip()
-                    customer_data_for_sale_order = builder._lookup_customer_by_name(customer_name, additional_attribute1=additional_attribute1)
+                            customer_code_value = str(row_result['data'][attr_col]).strip()
+                    customer_data_for_sale_order = builder._lookup_customer_by_name(
+                        customer_name, 
+                        customer_code_field=customer_code_field,
+                        customer_code_value=customer_code_value
+                    )
             
             # Create Sale via API
             success, message, response = api_client.create_sale(sale_data)

@@ -27,7 +27,7 @@ def get_credentials(client_id):
             FROM information_schema.columns 
             WHERE table_schema = 'voyager' 
             AND table_name = 'client_erp_credentials' 
-            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products')
+            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products', 'customer_code_field')
         """)
         existing_columns = {row[0] for row in db.session.execute(check_columns_query).fetchall()}
         
@@ -41,6 +41,7 @@ def get_credentials(client_id):
         has_product_default_price = 'product_default_price' in existing_columns
         has_product_currency = 'product_currency' in existing_columns
         has_auto_create = 'auto_create_customers_products' in existing_columns
+        has_customer_code_field = 'customer_code_field' in existing_columns
         
         # Build SELECT fields
         select_fields = [
@@ -103,6 +104,11 @@ def get_credentials(client_id):
             select_fields.append('cec.auto_create_customers_products')
         else:
             select_fields.append('false as auto_create_customers_products')
+        
+        if has_customer_code_field:
+            select_fields.append('cec.customer_code_field')
+        else:
+            select_fields.append('NULL as customer_code_field')
         
         select_fields.append('c.name as client_name')
         
@@ -182,6 +188,11 @@ def get_credentials(client_id):
             response_data['auto_create_customers_products'] = bool(row.auto_create_customers_products)
         else:
             response_data['auto_create_customers_products'] = False
+        
+        if has_customer_code_field and hasattr(row, 'customer_code_field'):
+            response_data['customer_code_field'] = row.customer_code_field or 'AdditionalAttribute1'  # Default for backward compatibility
+        else:
+            response_data['customer_code_field'] = 'AdditionalAttribute1'  # Default for backward compatibility
         
         return jsonify(response_data)
     except Exception as e:
@@ -335,7 +346,7 @@ def update_credential_settings(client_id):
             FROM information_schema.columns 
             WHERE table_schema = 'voyager' 
             AND table_name = 'client_erp_credentials' 
-            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products')
+            AND column_name IN ('default_location', 'customer_account_receivable', 'customer_revenue_account', 'customer_tax_rule', 'customer_attribute_set', 'product_costing_method', 'product_default_price_tier', 'product_default_price', 'product_currency', 'auto_create_customers_products', 'customer_code_field')
         """)
         existing_columns = {row[0] for row in db.session.execute(check_columns_query).fetchall()}
         
@@ -408,6 +419,10 @@ def update_credential_settings(client_id):
             updates.append('auto_create_customers_products = :auto_create_customers_products')
             params['auto_create_customers_products'] = bool(data['auto_create_customers_products'])
         
+        if 'customer_code_field' in data and 'customer_code_field' in existing_columns:
+            updates.append('customer_code_field = :customer_code_field')
+            params['customer_code_field'] = data['customer_code_field'] or None
+        
         if not updates:
             return jsonify({'error': 'No fields to update'}), 400
         
@@ -433,6 +448,8 @@ def update_credential_settings(client_id):
             return_fields_list.append('product_currency')
         if 'auto_create_customers_products' in existing_columns:
             return_fields_list.append('auto_create_customers_products')
+        if 'customer_code_field' in existing_columns:
+            return_fields_list.append('customer_code_field')
         return_fields = ', '.join(return_fields_list)
         
         # Update existing credentials (they always exist when a profile is selected)
@@ -488,6 +505,11 @@ def update_credential_settings(client_id):
         
         if 'auto_create_customers_products' in existing_columns and hasattr(row, 'auto_create_customers_products'):
             response_data['auto_create_customers_products'] = bool(row.auto_create_customers_products)
+        
+        if 'customer_code_field' in existing_columns and hasattr(row, 'customer_code_field'):
+            response_data['customer_code_field'] = row.customer_code_field or 'AdditionalAttribute1'  # Default for backward compatibility
+        elif 'customer_code_field' in existing_columns:
+            response_data['customer_code_field'] = 'AdditionalAttribute1'  # Default for backward compatibility
         
         return jsonify(response_data)
     except Exception as e:

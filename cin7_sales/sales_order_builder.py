@@ -66,17 +66,24 @@ class SalesOrderBuilder:
             'Type': sale_type_value  # Set Type based on client settings: "Advanced Sale" or "Simple Sale"
         }
         
-        # Customer - prioritize lookup by AdditionalAttribute1 first, then by name to get IDs
+        # Customer - prioritize lookup by customer code field first, then by name to get IDs
         customer_data = None
         
-        # Extract AdditionalAttribute1 from mapped data if available
-        additional_attribute1 = None
-        if 'AdditionalAttribute1' in mapped and mapped['AdditionalAttribute1']:
-            additional_attribute1 = str(mapped['AdditionalAttribute1']).strip()
+        # Get customer code field from column_mapping (optional - if not set, will match by name only)
+        customer_code_field = column_mapping.get('_customer_code_field')
+        
+        # Extract customer code value from mapped data if available
+        customer_code_value = None
+        if customer_code_field and customer_code_field in mapped and mapped[customer_code_field]:
+            customer_code_value = str(mapped[customer_code_field]).strip()
         
         if 'CustomerName' in mapped and mapped['CustomerName']:
-            # Lookup customer by AdditionalAttribute1 first (if provided), then by name to get CustomerID, ShippingAddressID, BillingAddressID
-            customer_data = self._lookup_customer_by_name(mapped['CustomerName'], additional_attribute1=additional_attribute1)
+            # Lookup customer by customer code field first (if provided), then by name to get CustomerID, ShippingAddressID, BillingAddressID
+            customer_data = self._lookup_customer_by_name(
+                mapped['CustomerName'], 
+                customer_code_field=customer_code_field,
+                customer_code_value=customer_code_value
+            )
             if customer_data:
                 sale['CustomerID'] = customer_data.get('ID')
                 # Don't set default shipping address here - will be handled by CSV mapping below if provided
@@ -446,19 +453,20 @@ class SalesOrderBuilder:
         
         return sale_order
     
-    def _lookup_customer_by_name(self, customer_name: str, additional_attribute1: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def _lookup_customer_by_name(self, customer_name: str, customer_code_field: Optional[str] = None, customer_code_value: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
-        Lookup customer by additional attribute first, then by name, and return customer data with shipping/billing IDs.
+        Lookup customer by customer code field first, then by name, and return customer data with shipping/billing IDs.
         
         Args:
             customer_name: Customer name to lookup (fallback)
-            additional_attribute1: Additional Attribute 1 value to search by first (priority)
+            customer_code_field: Cin7 field name to use for customer code matching (e.g., 'Tags', 'AdditionalAttribute1')
+            customer_code_value: Value to search by in the customer code field (priority)
         
         Returns:
             Customer data dictionary or None
         """
-        # Create cache key that includes both name and additional attribute
-        cache_key = f"{customer_name}|{additional_attribute1}"
+        # Create cache key that includes both name and customer code value
+        cache_key = f"{customer_name}|{customer_code_field or 'None'}|{customer_code_value or 'None'}"
         
         # Check cache first
         if cache_key in self._customer_cache:
@@ -468,16 +476,17 @@ class SalesOrderBuilder:
         if self.preloaded_customers:
             customer = None
             
-            # First, try to find by AdditionalAttribute1 if provided
-            if additional_attribute1:
-                attr1_clean = str(additional_attribute1).strip() if additional_attribute1 else None
-                if attr1_clean:
-                    attr1_key = f"_attr1:{attr1_clean}"
-                    customer = (self.preloaded_customers.get(attr1_key) or
-                               self.preloaded_customers.get(f"_attr1:{attr1_clean.upper()}") or
-                               self.preloaded_customers.get(f"_attr1:{attr1_clean.lower()}"))
+            # First, try to find by customer code field if provided
+            if customer_code_field and customer_code_value:
+                code_clean = str(customer_code_value).strip() if customer_code_value else None
+                if code_clean:
+                    # Build lookup key based on the customer code field name
+                    code_key = f"_{customer_code_field.lower()}:{code_clean}"
+                    customer = (self.preloaded_customers.get(code_key) or
+                               self.preloaded_customers.get(f"_{customer_code_field.lower()}:{code_clean.upper()}") or
+                               self.preloaded_customers.get(f"_{customer_code_field.lower()}:{code_clean.lower()}"))
             
-            # If not found by AdditionalAttribute1, try by name
+            # If not found by customer code field, try by name
             if not customer and customer_name:
                 customer_name_clean = customer_name.strip() if customer_name else None
                 if customer_name_clean:
@@ -491,17 +500,17 @@ class SalesOrderBuilder:
         
         # Only fallback to API if NOT preloaded (to avoid individual API calls)
         if self.api_client and not self.preloaded_customers:
-            # Try searching by AdditionalAttribute1 first if provided
-            # Note: API may not support direct AdditionalAttribute1 search, so we'll search by name and filter
+            # Try searching by customer code field first if provided
+            # Note: API may not support direct field search, so we'll search by name and filter
             customers = None
-            if additional_attribute1:
-                # Get all customers and filter by AdditionalAttribute1
+            if customer_code_field and customer_code_value:
+                # Get all customers and filter by the customer code field
                 all_customers = self.api_client.get_all_customers()
                 if all_customers:
-                    attr1_clean = str(additional_attribute1).strip().lower()
+                    code_clean = str(customer_code_value).strip().lower()
                     customers = [c for c in all_customers 
-                                if c.get('AdditionalAttribute1') and 
-                                str(c.get('AdditionalAttribute1')).strip().lower() == attr1_clean]
+                                if c.get(customer_code_field) and 
+                                str(c.get(customer_code_field)).strip().lower() == code_clean]
             
             # If no match by AdditionalAttribute1, search by name
             if not customers and customer_name:

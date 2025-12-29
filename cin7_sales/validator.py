@@ -58,10 +58,15 @@ class SalesOrderValidator:
         customer_id = mapped_data.get('CustomerID')
         shipping_address_str = mapped_data.get('ShippingAddress')  # Address string from CSV
         
-        # Extract AdditionalAttribute1 from mapped data if available
-        additional_attribute1 = mapped_data.get('AdditionalAttribute1')
-        if additional_attribute1:
-            additional_attribute1 = str(additional_attribute1).strip()
+        # Get customer code field from column_mapping (optional - if not set, will match by name only)
+        customer_code_field = column_mapping.get('_customer_code_field')
+        
+        # Extract customer code value from mapped data if available
+        customer_code_value = None
+        if customer_code_field:
+            customer_code_value = mapped_data.get(customer_code_field)
+            if customer_code_value:
+                customer_code_value = str(customer_code_value).strip()
         
         customer_match_result = None
         address_match_result = None
@@ -69,22 +74,22 @@ class SalesOrderValidator:
         needs_address_creation = False
         
         if customer_name:
-            # First try lookup by AdditionalAttribute1 if provided, then by name
+            # First try lookup by customer code field if provided, then by name
             customer = None
             if self.customers_loaded:
-                # First, try to find by AdditionalAttribute1 if provided
-                if additional_attribute1:
-                    attr1_key = f"_attr1:{additional_attribute1}"
-                    customer = (self.customer_lookup.get(attr1_key) or
-                               self.customer_lookup.get(f"_attr1:{additional_attribute1.upper()}") or
-                               self.customer_lookup.get(f"_attr1:{additional_attribute1.lower()}"))
+                # First, try to find by customer code field if provided
+                if customer_code_field and customer_code_value:
+                    code_key = f"_{customer_code_field.lower()}:{customer_code_value}"
+                    customer = (self.customer_lookup.get(code_key) or
+                               self.customer_lookup.get(f"_{customer_code_field.lower()}:{customer_code_value.upper()}") or
+                               self.customer_lookup.get(f"_{customer_code_field.lower()}:{customer_code_value.lower()}"))
                 
-                # If not found by AdditionalAttribute1, get all customer candidates for fuzzy matching by name
+                # If not found by customer code field, get all customer candidates for fuzzy matching by name
                 if not customer:
                     customer_candidates = []
                     for key, cust in self.customer_lookup.items():
-                        # Skip attribute-based keys for name matching
-                        if key.startswith('_attr1:'):
+                        # Skip all attribute-based keys for name matching (Tags, AdditionalAttribute1-10, etc.)
+                        if ':' in key and key.startswith('_'):
                             continue
                         if isinstance(cust, dict) and cust.get('Name'):
                             # Avoid duplicates (same customer may be stored multiple ways)
@@ -140,17 +145,17 @@ class SalesOrderValidator:
                     customer_match_result = (customer, 1.0, [(customer, 1.0)])
             else:
                 # Not preloaded - try API search
-                # First try by AdditionalAttribute1 if provided
+                # First try by customer code field if provided
                 customers = None
-                if additional_attribute1:
-                    # Get all customers and filter by AdditionalAttribute1
+                if customer_code_value:
+                    # Get all customers and filter by customer code field
                     try:
                         all_customers = self.api_client.get_all_customers()
                         if all_customers:
-                            attr1_clean = additional_attribute1.strip().lower()
+                            code_clean = customer_code_value.strip().lower()
                             customers = [c for c in all_customers 
-                                        if c.get('AdditionalAttribute1') and 
-                                        str(c.get('AdditionalAttribute1')).strip().lower() == attr1_clean]
+                                        if c.get(customer_code_field) and 
+                                        str(c.get(customer_code_field)).strip().lower() == code_clean]
                     except Exception:
                         # If get_all_customers fails, fall back to name search
                         pass
@@ -757,13 +762,14 @@ class SalesOrderValidator:
                             if settings.get('customer_attribute_set'):
                                 customer_payload['AttributeSet'] = settings['customer_attribute_set']
                             
-                            # Add AdditionalAttribute1 from CSV if mapped
-                            if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                                attr_col = column_mapping['AdditionalAttribute1']
+                            # Add customer code field from CSV if mapped (dynamically use the configured field)
+                            customer_code_field = column_mapping.get('_customer_code_field')
+                            if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                                attr_col = column_mapping[customer_code_field]
                                 if attr_col in primary_row['data']:
                                     attr_value = primary_row['data'][attr_col]
                                     if attr_value and str(attr_value).strip():
-                                        customer_payload['AdditionalAttribute1'] = str(attr_value).strip()
+                                        customer_payload[customer_code_field] = str(attr_value).strip()
                             
                             preview_payloads['customer_creation'] = customer_payload
                             
@@ -927,15 +933,25 @@ class SalesOrderValidator:
                     self.customer_lookup[customer_name_clean.lower()] = customer
                 
                 # Build lookup by AdditionalAttribute1 (case-insensitive, strip whitespace)
-                additional_attr1 = customer.get('AdditionalAttribute1')
-                if additional_attr1:
-                    attr1_clean = str(additional_attr1).strip() if additional_attr1 else None
-                    if attr1_clean:
-                        # Store with prefix to distinguish from name lookups
-                        attr1_key = f"_attr1:{attr1_clean}"
-                        self.customer_lookup[attr1_key] = customer
-                        self.customer_lookup[f"_attr1:{attr1_clean.upper()}"] = customer
-                        self.customer_lookup[f"_attr1:{attr1_clean.lower()}"] = customer
+                # Index by all possible customer code fields for flexible lookup
+                # This allows the mapping to specify any field (Tags, AdditionalAttribute1-10)
+                customer_code_fields = [
+                    'Tags', 'AdditionalAttribute1', 'AdditionalAttribute2', 'AdditionalAttribute3',
+                    'AdditionalAttribute4', 'AdditionalAttribute5', 'AdditionalAttribute6',
+                    'AdditionalAttribute7', 'AdditionalAttribute8', 'AdditionalAttribute9', 'AdditionalAttribute10'
+                ]
+                
+                for field_name in customer_code_fields:
+                    field_value = customer.get(field_name)
+                    if field_value:
+                        field_clean = str(field_value).strip() if field_value else None
+                        if field_clean:
+                            # Store with prefix to distinguish from name lookups
+                            # Use lowercase field name for consistency
+                            field_key = f"_{field_name.lower()}:{field_clean}"
+                            self.customer_lookup[field_key] = customer
+                            self.customer_lookup[f"_{field_name.lower()}:{field_clean.upper()}"] = customer
+                            self.customer_lookup[f"_{field_name.lower()}:{field_clean.lower()}"] = customer
             
             self.customers_loaded = True
         except Exception as e:

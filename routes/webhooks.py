@@ -454,14 +454,33 @@ def process_single_order(
         customer_name_for_matching = customer_name or order_data.get('customer_name', '') or order_data.get('customername', '')
         
         if customer_name_for_matching:
-            # Extract AdditionalAttribute1 if available
-            additional_attribute1 = primary_row.get('AdditionalAttribute1') or primary_row.get('additional_attribute1')
-            customer_data = builder._lookup_customer_by_name(customer_name_for_matching, additional_attribute1)
+            # Get customer code field from column_mapping (optional - if not set, will match by name only)
+            customer_code_field = column_mapping.get('_customer_code_field')
+            
+            # Extract customer code value from primary row if available
+            customer_code_value = None
+            if customer_code_field:
+                if customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                    csv_col = column_mapping[customer_code_field]
+                    if csv_col in primary_row:
+                        customer_code_value = primary_row[csv_col]
+                # Fallback: try direct field name in case it's already mapped
+                if not customer_code_value:
+                    customer_code_value = primary_row.get(customer_code_field) or primary_row.get(customer_code_field.lower())
+                
+                if customer_code_value:
+                    customer_code_value = str(customer_code_value).strip()
+            
+            customer_data = builder._lookup_customer_by_name(
+                customer_name_for_matching, 
+                customer_code_field=customer_code_field,
+                customer_code_value=customer_code_value
+            )
             
             # Build search query info for debugging (always include, whether found or not)
             search_queries = []
-            if additional_attribute1:
-                search_queries.append({'type': 'AdditionalAttribute1', 'value': additional_attribute1, 'api_endpoint': f'/customer?AdditionalAttribute1={additional_attribute1}'})
+            if customer_code_value:
+                search_queries.append({'type': customer_code_field, 'value': customer_code_value, 'api_endpoint': f'/customer?{customer_code_field}={customer_code_value}'})
             search_queries.append({'type': 'name', 'value': customer_name_for_matching, 'api_endpoint': f'/customer?name={customer_name_for_matching}'})
             
             if customer_data:
@@ -776,13 +795,14 @@ def process_single_order(
                 if settings.get('customer_attribute_set'):
                     customer_payload['AttributeSet'] = settings['customer_attribute_set']
                 
-                # Add AdditionalAttribute1 from CSV if mapped
-                if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                    attr_col = column_mapping['AdditionalAttribute1']
-                    if attr_col in primary_row:
-                        attr_value = primary_row[attr_col]
+                # Add customer code field from CSV if mapped (dynamically use the configured field)
+                customer_code_field = column_mapping.get('_customer_code_field')
+                if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                    csv_col = column_mapping[customer_code_field]
+                    if csv_col in primary_row:
+                        attr_value = primary_row[csv_col]
                         if attr_value and str(attr_value).strip():
-                            customer_payload['AdditionalAttribute1'] = str(attr_value).strip()
+                            customer_payload[customer_code_field] = str(attr_value).strip()
                 
                 # Create customer
                 create_success, create_message, create_response = api_client.create_customer(customer_payload)
@@ -829,12 +849,15 @@ def process_single_order(
                             
                             # Get additional_attribute1 if available
                             additional_attribute1 = None
-                            if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                                attr_col = column_mapping['AdditionalAttribute1']
+                            # Get customer code field value for cache key
+                            customer_code_field = column_mapping.get('_customer_code_field')
+                            customer_code_value = None
+                            if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                                attr_col = column_mapping[customer_code_field]
                                 if attr_col in primary_row:
                                     attr_value = primary_row[attr_col]
                                     if attr_value and str(attr_value).strip():
-                                        additional_attribute1 = str(attr_value).strip()
+                                        customer_code_value = str(attr_value).strip()
                             
                             # Clear ALL cache entries for this customer name (to handle any additional_attribute1 variations)
                             cache_keys_to_remove = [key for key in builder._customer_cache.keys() if key.startswith(f"{customer_name_clean}|")]
@@ -945,12 +968,15 @@ def process_single_order(
                                         
                                         # Get additional_attribute1 if available
                                         additional_attribute1 = None
-                                        if 'AdditionalAttribute1' in column_mapping and column_mapping['AdditionalAttribute1']:
-                                            attr_col = column_mapping['AdditionalAttribute1']
+                                        # Get customer code field value for cache key
+                                        customer_code_field = column_mapping.get('_customer_code_field')
+                                        customer_code_value = None
+                                        if customer_code_field and customer_code_field in column_mapping and column_mapping[customer_code_field]:
+                                            attr_col = column_mapping[customer_code_field]
                                             if attr_col in primary_row:
                                                 attr_value = primary_row[attr_col]
                                                 if attr_value and str(attr_value).strip():
-                                                    additional_attribute1 = str(attr_value).strip()
+                                                    customer_code_value = str(attr_value).strip()
                                         
                                         # Clear ALL cache entries for this customer name
                                         cache_keys_to_remove = [key for key in builder._customer_cache.keys() if key.startswith(f"{customer_name_clean}|")]
@@ -958,10 +984,14 @@ def process_single_order(
                                             del builder._customer_cache[key]
                                         
                                         # Update cache with the existing customer
-                                        cache_key_with_attr = f"{customer_name_clean}|{additional_attribute1}"
-                                        cache_key_no_attr = f"{customer_name_clean}|None"
-                                        builder._customer_cache[cache_key_with_attr] = existing_customer
-                                        builder._customer_cache[cache_key_no_attr] = existing_customer
+                                        if customer_code_field:
+                                            cache_key_with_code = f"{customer_name_clean}|{customer_code_field}|{customer_code_value}"
+                                            cache_key_no_code = f"{customer_name_clean}|{customer_code_field}|None"
+                                        else:
+                                            cache_key_with_code = f"{customer_name_clean}|None|None"
+                                            cache_key_no_code = f"{customer_name_clean}|None|None"
+                                        builder._customer_cache[cache_key_with_code] = existing_customer
+                                        builder._customer_cache[cache_key_no_code] = existing_customer
                                         
                                         # Force commit
                                         db.session.commit()
