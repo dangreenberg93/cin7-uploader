@@ -172,7 +172,7 @@ class CSVParser:
             'CustomerID': ['customer_id', 'customerid', 'customer', 'customer id', 'cust_id'],
             'CustomerName': ['customer_name', 'customername', 'customer name', 'name', 'customer'],
             'CustomerEmail': ['customer_email', 'customeremail', 'customer email', 'email'],
-            'SaleOrderNumber': ['sale_order_number', 'saleordernumber', 'sale order number', 'order_number', 'order number', 'order', 'order_id', 'orderid', 'order #', 'order#'],
+            'SaleOrderNumber': ['sale_order_number', 'saleordernumber', 'sale order number', 'order_number', 'ordernumber', 'order number', 'order', 'order_id', 'orderid', 'order #', 'order#'],
             'InvoiceNumber': ['invoice_number', 'invoicenumber', 'invoice number', 'invoice #', 'invoice#', 'invoice', 'invoice_id', 'invoiceid'],
             'CustomerReference': ['customer_reference', 'customerreference', 'customer reference', 'reference', 'ref', 'po_number', 'po number', 'po', 'purchase_order', 'purchaseorder', 'purchase order'],
             'SaleOrderDate': ['sale_order_date', 'saleorderdate', 'sale order date', 'sale_date', 'saledate', 'sale date', 'date', 'order_date', 'order date'],

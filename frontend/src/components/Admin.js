@@ -198,11 +198,12 @@ const Admin = ({ user }) => {
   };
 
   // Cin7 field options for mapping
-  // Note: CustomerID, CustomerEmail, SaleOrderNumber, InvoiceNumber, Status, Location
+  // Note: CustomerID, CustomerEmail, InvoiceNumber, Status, Location
   // are auto-generated or handled automatically via lookups, so they're not shown here
   const cin7Fields = [
     { value: 'CustomerName', label: 'Customer Name (Lookup)', category: 'Customer', required: true },
     { value: 'CustomerReference', label: 'Customer Reference (PO#)', category: 'Order', required: true },
+    { value: 'SaleOrderNumber', label: 'Order Number (Reference)', category: 'Order', required: false },
     { value: 'SaleDate', label: 'Sale Date', category: 'Order', required: true },
     { value: 'Currency', label: 'Currency', category: 'Order', required: false },
     { value: 'TaxInclusive', label: 'Tax Inclusive', category: 'Order', required: false },

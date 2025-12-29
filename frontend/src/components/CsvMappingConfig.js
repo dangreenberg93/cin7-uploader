@@ -23,12 +23,13 @@ const CsvMappingConfig = () => {
   const [isDefault, setIsDefault] = useState(false);
 
   // Cin7 field options
-  // Note: CustomerID, CustomerCode, CustomerEmail, SaleOrderNumber, InvoiceNumber, Status, Location
+  // Note: CustomerID, CustomerCode, CustomerEmail, InvoiceNumber, Status, Location
   // are auto-generated or handled automatically via lookups, so they're not shown here
   // Note: Tags and AdditionalAttribute1-10 are handled separately via customer code field selector
   const cin7Fields = [
     { value: 'CustomerName', label: 'Customer Name (Lookup)', category: 'Customer' },
     { value: 'CustomerReference', label: 'Customer Reference (PO)', category: 'Order' },
+    { value: 'SaleOrderNumber', label: 'Order Number (Reference)', category: 'Order' },
     { value: 'SaleDate', label: 'Sale Date', category: 'Order' },
     { value: 'ShipBy', label: 'Required By / Due Date', category: 'Order' },
     { value: 'ShippingAddress', label: 'Ship To Address', category: 'Order' },

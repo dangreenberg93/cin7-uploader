@@ -732,11 +732,12 @@ const SalesOrderUploader = ({ user }) => {
   };
 
   // Cin7 field options
-  // Note: CustomerID, CustomerCode, CustomerEmail, SaleOrderNumber, InvoiceNumber, Status, Location
+  // Note: CustomerID, CustomerCode, CustomerEmail, InvoiceNumber, Status, Location
   // are auto-generated or handled automatically via lookups, so they're not shown here
   const cin7Fields = [
     { value: 'CustomerName', label: 'Customer Name (Lookup)', required: true },
     { value: 'CustomerReference', label: 'Customer Reference (PO)', required: true },
+    { value: 'SaleOrderNumber', label: 'Order Number (Reference)', required: false },
     { value: 'SaleDate', label: 'Sale Date', required: true },
     { value: 'ShipBy', label: 'Required By / Due Date', required: false },
     { value: 'ShippingAddress', label: 'Ship To Address', required: false },

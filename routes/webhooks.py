@@ -450,7 +450,14 @@ def process_single_order(
     )
     order_data['po_number'] = primary_row.get('CustomerReference') or primary_row.get('po_number', '') or order_data.get('customerreference', '')
     order_data['order_date'] = primary_row.get('SaleDate') or primary_row.get('order_date', '') or order_data.get('saledate', '')
-    order_data['order_number'] = primary_row.get('SaleOrderNumber') or primary_row.get('order_number', '') or order_data.get('saleordernumber', '')
+    # Capture order number from mapped SaleOrderNumber column (for reference, not sent to Cin7)
+    order_data['order_number'] = (
+        primary_row.get(column_mapping.get('SaleOrderNumber', '')) or  # From mapped SaleOrderNumber column
+        primary_row.get('SaleOrderNumber') or
+        primary_row.get('order_number', '') or
+        order_data.get('saleordernumber', '') or
+        order_data.get('ordernumber', '')
+    )
     
     # Initialize sale_id early to avoid UnboundLocalError in exception handler
     sale_id = None
@@ -4933,21 +4940,38 @@ def get_queue():
         # Apply pagination
         uploads = query.limit(limit).offset(offset).all()
         
+        # Get all upload IDs for batch loading
+        upload_ids = [upload.id for upload in uploads]
+        
+        # Batch load all order results in one query (avoid N+1)
+        all_order_results = {}
+        if upload_ids:
+            order_results_query = SalesOrderResult.query.filter(
+                SalesOrderResult.upload_id.in_(upload_ids)
+            ).order_by(SalesOrderResult.created_at.asc()).all()
+            
+            # Group by upload_id
+            for or_result in order_results_query:
+                if or_result.upload_id not in all_order_results:
+                    all_order_results[or_result.upload_id] = []
+                all_order_results[or_result.upload_id].append(or_result)
+        
+        # Batch load client names (avoid N+1)
+        client_ids = [upload.client_id for upload in uploads if upload.client_id]
+        client_names = {}
+        if client_ids:
+            clients = Client.query.filter(Client.id.in_(client_ids)).all()
+            for client in clients:
+                client_names[client.id] = client.name
+        
         # Build response
         result = []
         for upload in uploads:
-            # Get order results
-            order_results = SalesOrderResult.query.filter_by(upload_id=upload.id).order_by(SalesOrderResult.created_at.asc()).all()
+            # Get order results from batch-loaded data
+            order_results = all_order_results.get(upload.id, [])
             
-            # Get client name
-            client_name = None
-            if upload.client_id:
-                try:
-                    client = Client.query.get(upload.client_id)
-                    if client:
-                        client_name = client.name
-                except Exception:
-                    pass
+            # Get client name from batch-loaded data
+            client_name = client_names.get(upload.client_id) if upload.client_id else None
             
             result.append({
                 'id': str(upload.id),
