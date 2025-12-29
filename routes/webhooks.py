@@ -3220,6 +3220,8 @@ def process_webhook_csv(
     # PHASE 2: Process each order (all customers/products should now exist)
     successful_count = 0
     failed_count = 0
+    total_orders = len(row_groups)
+    orders_processed = 0
     
     for order_key, group_rows in row_groups.items():
         # Extract row data and row numbers
@@ -3251,6 +3253,18 @@ def process_webhook_csv(
             successful_count += 1
         else:
             failed_count += 1
+        
+        orders_processed += 1
+        
+        # Emit progress event after each order to refresh sidebar counts in real-time
+        upload = SalesOrderUpload.query.get(upload_id)
+        if upload:
+            # Update counts in real-time after each order
+            upload.successful_orders = successful_count
+            upload.failed_orders = failed_count
+            db.session.commit()
+            # Emit event to refresh sidebar and queue after each order
+            emit_upload_event('upload_status_changed', str(upload_id), str(upload.client_id) if upload.client_id else None)
         
         # Rate limiting delay between orders
         delay = settings.get('default_delay_between_orders', 0.7)

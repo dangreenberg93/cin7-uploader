@@ -2293,7 +2293,9 @@ const QueueView = () => {
                             return getStatusBadge(displayStatus);
                           })()}
                         </TableCell>
-                        <TableCell className={`text-right ${isLastDataRow ? '!border-b' : ''}`}>{upload.order_results?.length || 0}</TableCell>
+                        <TableCell className={`text-right ${isLastDataRow ? '!border-b' : ''}`} title="Unique orders (not row count)">
+                          {upload.order_results?.length || 0}
+                        </TableCell>
                         <TableCell className={`text-right text-green-600 ${isLastDataRow ? '!border-b' : ''}`}>{successfulOrders.length}</TableCell>
                         <TableCell className={`text-right text-red-600 ${isLastDataRow ? '!border-b' : ''}`}>{failedOrdersForUpload.length}</TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()} className={isLastDataRow ? '!border-b' : ''}>
