@@ -2362,8 +2362,17 @@ def process_webhook_csv(
         # Try to get from detected mappings
         if 'SaleOrderNumber' in detected_mappings and detected_mappings['SaleOrderNumber']:
             column_mapping['SaleOrderNumber'] = detected_mappings['SaleOrderNumber'][0]
+            logger.info(f"Auto-mapped SaleOrderNumber to '{detected_mappings['SaleOrderNumber'][0]}' for order grouping")
         elif 'InvoiceNumber' in detected_mappings and detected_mappings['InvoiceNumber']:
             column_mapping['InvoiceNumber'] = detected_mappings['InvoiceNumber'][0]
+            logger.info(f"Auto-mapped InvoiceNumber to '{detected_mappings['InvoiceNumber'][0]}' for order grouping")
+    
+    # Log final column mapping for debugging
+    if 'SaleOrderNumber' in column_mapping or 'InvoiceNumber' in column_mapping:
+        grouping_col = column_mapping.get('SaleOrderNumber') or column_mapping.get('InvoiceNumber')
+        logger.info(f"Order grouping will use: {grouping_col}")
+    else:
+        logger.warning(f"WARNING: No SaleOrderNumber or InvoiceNumber mapped - orders may not group correctly! Available columns: {list(rows[0]['data'].keys()) if rows else []}")
     
     if not column_mapping:
         return {
@@ -2665,6 +2674,12 @@ def process_webhook_csv(
     validator = SalesOrderValidator(api_client)
     row_groups = validator._group_rows_by_order(rows, column_mapping)
     logger.info(f"Grouped {len(rows)} rows into {len(row_groups)} order groups")
+    
+    # Log order keys for debugging
+    if len(row_groups) != len(set(row_groups.keys())):
+        logger.warning(f"WARNING: Duplicate order keys detected in grouping!")
+    for order_key, group_rows in row_groups.items():
+        logger.debug(f"Order key '{order_key}': {len(group_rows)} row(s) - rows {[r['row_number'] for r in group_rows]}")
     
     if not row_groups:
         logger.warning(f"No order groups found - this will result in 0 orders processed")

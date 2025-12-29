@@ -546,8 +546,22 @@ class SalesOrderValidator:
                     order_key = str(so_val).strip()
                     has_order_id = True
             
-            # Check for customer name
-            customer_col = column_mapping.get('CustomerName') or column_mapping.get('Customer')
+            # Fallback: If no SaleOrderNumber/InvoiceNumber, try grouping by CustomerReference (PO #) + CustomerName
+            # This helps when Order # column isn't mapped but PO # is available
+            if not order_key:
+                customer_ref_col = column_mapping.get('CustomerReference')
+                customer_col = column_mapping.get('CustomerName') or column_mapping.get('Customer')
+                if customer_ref_col and customer_col:
+                    po_val = row['data'].get(customer_ref_col) or next((v for k, v in row['data'].items() if k.lower() == customer_ref_col.lower()), None)
+                    customer_val = row['data'].get(customer_col) or next((v for k, v in row['data'].items() if k.lower() == customer_col.lower()), None)
+                    if po_val and str(po_val).strip() and customer_val and str(customer_val).strip():
+                        # Use PO + Customer as order key (more reliable than ROW_ fallback)
+                        order_key = f"{str(customer_val).strip()}_{str(po_val).strip()}"
+                        has_order_id = True
+            
+            # Check for customer name (for has_customer flag)
+            if not customer_col:
+                customer_col = column_mapping.get('CustomerName') or column_mapping.get('Customer')
             if customer_col:
                 customer_val = row['data'].get(customer_col) or next((v for k, v in row['data'].items() if k.lower() == customer_col.lower()), None)
                 if customer_val and str(customer_val).strip():
