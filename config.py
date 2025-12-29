@@ -29,7 +29,7 @@ class Config:
     GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID') or ''
     GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET') or ''
     GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI') or 'http://localhost:5001/api/auth/google/callback'
-    FRONTEND_URL = os.environ.get('FRONTEND_URL') or 'http://localhost:3000'
+    FRONTEND_URL = os.environ.get('FRONTEND_URL') or 'https://cin7-uploader-1084228140944.us-central1.run.app'
     
     # Supabase Configuration (if using Supabase for auth)
     SUPABASE_URL = os.environ.get('SUPABASE_URL') or ''

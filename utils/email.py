@@ -16,7 +16,7 @@ def send_password_reset_email(email, reset_token):
     """
     try:
         # Get frontend URL from config
-        frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = current_app.config.get('FRONTEND_URL', 'https://cin7-uploader-1084228140944.us-central1.run.app')
         
         # Create reset link
         reset_link = f"{frontend_url}/reset-password?token={reset_token}"
