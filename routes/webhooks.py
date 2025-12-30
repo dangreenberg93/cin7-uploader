@@ -3455,13 +3455,15 @@ def receive_email_webhook():
         # Check for duplicate upload (same filename + credentials within last hour) - idempotency
         # Use client_erp_credentials_id since that uniquely identifies the connection
         # (client_id can be None for standalone connections, causing false duplicates)
+        # Exclude "pending" status uploads as they're temporary records from /sales/upload confirmation modal
         one_hour_ago = datetime.utcnow() - timedelta(hours=1)
         logger.info(f"Checking for duplicate upload - filename: {filename}, client_id: {client_id_for_upload}, client_erp_credentials_id: {client_erp_credentials_id}")
         recent_duplicate = SalesOrderUpload.query.filter_by(
             filename=filename,
             client_erp_credentials_id=client_erp_credentials_id
         ).filter(
-            SalesOrderUpload.created_at >= one_hour_ago
+            SalesOrderUpload.created_at >= one_hour_ago,
+            SalesOrderUpload.status != 'pending'  # Exclude pending uploads from duplicate detection
         ).order_by(SalesOrderUpload.created_at.desc()).first()
         
         # Store CSV content as base64 for preview
@@ -3668,6 +3670,19 @@ def manual_upload():
         except (ValueError, AttributeError):
             return jsonify({'error': 'Invalid client_id format'}), 400
         
+        # Get optional existing_upload_id (from /sales/upload confirmation flow)
+        existing_upload_id = request.form.get('existing_upload_id')
+        existing_upload = None
+        if existing_upload_id:
+            try:
+                existing_upload_uuid = uuid.UUID(existing_upload_id)
+                existing_upload = SalesOrderUpload.query.get(existing_upload_uuid)
+                if existing_upload and existing_upload.status != 'pending':
+                    # Only reuse if it's still pending, otherwise ignore
+                    existing_upload = None
+            except (ValueError, AttributeError):
+                existing_upload = None
+        
         # Get file
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -3722,59 +3737,73 @@ def manual_upload():
         logger.info(f"Manual upload - filename: {filename}, client_erp_credentials_id: {client_erp_credentials_id}, client_id: {client_id_for_upload}")
         
         # Check for duplicate upload (same filename + credentials within last hour) - idempotency
+        # Exclude "pending" status uploads as they're temporary records from /sales/upload confirmation modal
         one_hour_ago = datetime.utcnow() - timedelta(hours=1)
         recent_duplicate = SalesOrderUpload.query.filter_by(
             filename=filename,
             client_erp_credentials_id=client_erp_credentials_id
         ).filter(
-            SalesOrderUpload.created_at >= one_hour_ago
+            SalesOrderUpload.created_at >= one_hour_ago,
+            SalesOrderUpload.status != 'pending'  # Exclude pending uploads from duplicate detection
         ).order_by(SalesOrderUpload.created_at.desc()).first()
         
         # Store CSV content as base64 for preview
         import base64
         csv_base64 = base64.b64encode(csv_content).decode('utf-8')
         
-        # Create upload record immediately (even if duplicate, so it appears in UI)
-        upload_id = uuid.uuid4()
-        
-        # Check if this is a duplicate
-        is_duplicate = recent_duplicate is not None
-        if is_duplicate:
-            logger.info(f"Duplicate upload detected - filename: {filename}, existing upload_id: {recent_duplicate.id}")
-            upload = SalesOrderUpload(
-                id=upload_id,
-                user_id=user_id,  # Manual upload has user context
-                client_id=client_id_for_upload,  # May be None for standalone connections
-                client_erp_credentials_id=client_erp_credentials_id,
-                filename=filename,
-                total_rows=0,
-                successful_orders=0,
-                failed_orders=0,
-                status='duplicate',
-                error_log=[{
-                    'message': f'This file was already processed recently',
-                    'duplicate_of_upload_id': str(recent_duplicate.id),
-                    'duplicate_of_created_at': recent_duplicate.created_at.isoformat() if recent_duplicate.created_at else None,
-                    'duplicate_of_status': recent_duplicate.status
-                }],
-                csv_content=csv_base64
-            )
+        # Reuse existing upload if provided (from /sales/upload confirmation flow)
+        if existing_upload:
+            logger.info(f"Reusing existing upload record - upload_id: {existing_upload.id}, updating from 'pending' to 'processing'")
+            upload_id = existing_upload.id
+            upload = existing_upload
+            # Update the existing upload record
+            upload.status = 'processing'
+            upload.csv_content = csv_base64
+            upload.total_rows = 0  # Will be updated after parsing
+            # Don't change user_id, client_id, or client_erp_credentials_id as they're already set
+            is_duplicate = False  # Not a duplicate since we're reusing the pending upload
         else:
-            logger.info(f"No duplicate found, proceeding with new upload creation")
-            upload = SalesOrderUpload(
-                id=upload_id,
-                user_id=user_id,  # Manual upload has user context
-                client_id=client_id_for_upload,  # May be None for standalone connections
-                client_erp_credentials_id=client_erp_credentials_id,
-                filename=filename,
-                total_rows=0,  # Will be updated after parsing
-                successful_orders=0,
-                failed_orders=0,
-                status='processing',
-                csv_content=csv_base64
-            )
+            # Create upload record immediately (even if duplicate, so it appears in UI)
+            upload_id = uuid.uuid4()
+            
+            # Check if this is a duplicate
+            is_duplicate = recent_duplicate is not None
+            if is_duplicate:
+                logger.info(f"Duplicate upload detected - filename: {filename}, existing upload_id: {recent_duplicate.id}")
+                upload = SalesOrderUpload(
+                    id=upload_id,
+                    user_id=user_id,  # Manual upload has user context
+                    client_id=client_id_for_upload,  # May be None for standalone connections
+                    client_erp_credentials_id=client_erp_credentials_id,
+                    filename=filename,
+                    total_rows=0,
+                    successful_orders=0,
+                    failed_orders=0,
+                    status='duplicate',
+                    error_log=[{
+                        'message': f'This file was already processed recently',
+                        'duplicate_of_upload_id': str(recent_duplicate.id),
+                        'duplicate_of_created_at': recent_duplicate.created_at.isoformat() if recent_duplicate.created_at else None,
+                        'duplicate_of_status': recent_duplicate.status
+                    }],
+                    csv_content=csv_base64
+                )
+            else:
+                logger.info(f"No duplicate found, proceeding with new upload creation")
+                upload = SalesOrderUpload(
+                    id=upload_id,
+                    user_id=user_id,  # Manual upload has user context
+                    client_id=client_id_for_upload,  # May be None for standalone connections
+                    client_erp_credentials_id=client_erp_credentials_id,
+                    filename=filename,
+                    total_rows=0,  # Will be updated after parsing
+                    successful_orders=0,
+                    failed_orders=0,
+                    status='processing',
+                    csv_content=csv_base64
+                )
+                db.session.add(upload)
         
-        db.session.add(upload)
         try:
             db.session.commit()
             # Emit event when upload starts processing

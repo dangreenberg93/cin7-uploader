@@ -89,6 +89,12 @@ const QueueView = () => {
   const [loadingAutoCreateStatus, setLoadingAutoCreateStatus] = useState(false);
   const [csvRowCount, setCsvRowCount] = useState(0);
   const [csvUniqueOrderCount, setCsvUniqueOrderCount] = useState(0);
+  
+  // Template selection state
+  const [uploadResponseData, setUploadResponseData] = useState(null);
+  const [selectedTemplateId, setSelectedTemplateId] = useState(null);
+  const [previewMapping, setPreviewMapping] = useState({});
+  const [previewCsvRows, setPreviewCsvRows] = useState([]);
 
   // Filter and sort uploads
   const filteredAndSortedUploads = useMemo(() => {
@@ -1114,6 +1120,11 @@ const QueueView = () => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('client_id', selectedClientId);
+      
+      // If we have an upload_id from the confirmation modal, pass it to reuse the pending upload
+      if (uploadResponseData?.upload_id) {
+        formData.append('existing_upload_id', uploadResponseData.upload_id);
+      }
 
       const response = await axios.post('/webhooks/upload', formData, {
         headers: {
@@ -1278,21 +1289,57 @@ const QueueView = () => {
       setCsvUniqueOrderCount(uniqueOrderCount);
       
       // Fetch auto-create status
-      const response = await axios.get(`/credentials/clients/${selectedClientId}`);
-      const credentials = response.data;
+      const credentialsResponse = await axios.get(`/credentials/clients/${selectedClientId}`);
+      const credentials = credentialsResponse.data;
       const isAutoCreateEnabled = credentials.auto_create_customers_products === true || 
                                    credentials.auto_create_customers_products === 'true' || 
                                    credentials.auto_create_customers_products === 1;
       
       setAutoCreateEnabled(isAutoCreateEnabled);
       setPendingFile(file);
+      
+      // Upload to /sales/upload to get templates and mapping info
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('client_id', selectedClientId);
+      
+      const uploadResponse = await axios.post('/sales/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      
+      console.log('Upload response:', uploadResponse.data);
+      setUploadResponseData(uploadResponse.data);
+      
+      // Determine default template ID
+      const defaultTemplateId = uploadResponse.data.default_template_id || 
+        (uploadResponse.data.templates && uploadResponse.data.templates.length === 1 ? uploadResponse.data.templates[0].id : null);
+      setSelectedTemplateId(defaultTemplateId);
+      
+      // Set initial preview mapping
+      // Exclude Location and ProductName - we don't need to capture those
+      const initialMapping = uploadResponse.data.initial_mapping || {};
+      const filteredMapping = {};
+      Object.keys(initialMapping).forEach(cin7Field => {
+        if (cin7Field !== 'Location' && cin7Field !== 'ProductName') {
+          filteredMapping[cin7Field] = initialMapping[cin7Field];
+        }
+      });
+      setPreviewMapping(filteredMapping);
+      
+      // Fetch CSV rows for preview
+      try {
+        const rowsResponse = await axios.get(`/sales/rows?session_id=${uploadResponse.data.session_id}`);
+        setPreviewCsvRows(rowsResponse.data.rows || []);
+      } catch (error) {
+        console.error('Failed to load CSV rows:', error);
+      }
+      
       setUploadConfirmModalOpen(true);
     } catch (error) {
-      console.error('Error fetching auto-create status:', error);
-      // Still show modal even if we can't fetch status
+      console.error('Error preparing upload:', error);
+      toast.error('Failed to prepare upload. Please try again.');
       setAutoCreateEnabled(false);
-      setPendingFile(file);
-      setUploadConfirmModalOpen(true);
+      setPendingFile(null);
     } finally {
       setLoadingAutoCreateStatus(false);
     }
@@ -1328,6 +1375,10 @@ const QueueView = () => {
     setAutoCreateEnabled(false);
     setCsvRowCount(0);
     setCsvUniqueOrderCount(0);
+    setUploadResponseData(null);
+    setSelectedTemplateId(null);
+    setPreviewMapping({});
+    setPreviewCsvRows([]);
     // Reset file input
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -3471,52 +3522,230 @@ const QueueView = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Upload Confirmation Modal */}
-      <Dialog open={uploadConfirmModalOpen} onOpenChange={setUploadConfirmModalOpen}>
-        <DialogContent className="max-w-md">
+      {/* Upload Confirmation Modal with Template Selection */}
+      <Dialog open={uploadConfirmModalOpen} onOpenChange={(open) => {
+        if (!open) {
+          handleCancelUpload();
+        }
+      }}>
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
-            <DialogTitle>Confirm File Upload</DialogTitle>
+            <DialogTitle>Confirm Upload & Select Template</DialogTitle>
             <DialogDescription>
-              Please review the upload details before proceeding.
+              Review the mapping template and see how CSV columns will be mapped to Cin7 fields
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="flex-1 overflow-auto space-y-4">
             {loadingAutoCreateStatus ? (
-              <div className="flex items-center justify-center py-4">
+              <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-5 w-5 animate-spin mr-2" />
-                <span className="text-sm text-muted-foreground">Checking settings...</span>
+                <span className="text-sm text-muted-foreground">Preparing upload...</span>
               </div>
-            ) : (
+            ) : uploadResponseData ? (
               <>
-                <div className="space-y-2">
-                  <Label className="text-sm font-medium">File Name</Label>
-                  <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
-                    <FileText className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{pendingFile?.name || 'Unknown'}</span>
+                {/* File Info */}
+                <div className="bg-muted p-3 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4" />
+                    <span className="font-medium">{uploadResponseData.filename || pendingFile?.name}</span>
+                    <Badge variant="outline">{uploadResponseData.row_count || csvRowCount} rows</Badge>
+                    {csvUniqueOrderCount > 0 && (
+                      <Badge variant="outline">{csvUniqueOrderCount} {csvUniqueOrderCount === 1 ? 'order' : 'orders'}</Badge>
+                    )}
                   </div>
                 </div>
-                
+
+                {/* Template Selection */}
                 <div className="space-y-2">
-                  <Label className="text-sm font-medium">Row Count</Label>
-                  <div className="p-2 bg-muted rounded-md">
-                    <span className="text-sm font-medium">
-                      {csvRowCount.toLocaleString()} {csvRowCount === 1 ? 'row' : 'rows'}
-                    </span>
+                  <Label htmlFor="template-select">Mapping Template</Label>
+                  <Select
+                    value={selectedTemplateId || 'none'}
+                    onValueChange={(value) => {
+                      setSelectedTemplateId(value === 'none' ? null : value);
+                      const template = uploadResponseData.templates?.find(t => t.id === value);
+                      if (template) {
+                        // Merge detected mappings with template mapping
+                        const merged = {};
+                        // Start with detected mappings (exclude Location and ProductName)
+                        Object.keys(uploadResponseData.detected_mappings || {}).forEach(cin7Field => {
+                          // Exclude Location and ProductName - we don't need to capture those
+                          if (cin7Field === 'Location' || cin7Field === 'ProductName') {
+                            return;
+                          }
+                          const matches = uploadResponseData.detected_mappings[cin7Field];
+                          if (matches && matches.length > 0) {
+                            merged[cin7Field] = matches[0];
+                          }
+                        });
+                        // Override with template mapping (exclude Location and ProductName)
+                        Object.keys(template.column_mapping || {}).forEach(cin7Field => {
+                          // Exclude Location and ProductName - we don't need to capture those
+                          if (cin7Field === 'Location' || cin7Field === 'ProductName') {
+                            return;
+                          }
+                          const csvCol = template.column_mapping[cin7Field];
+                          if (csvCol) {
+                            merged[cin7Field] = csvCol;
+                          }
+                        });
+                        setPreviewMapping(merged);
+                      } else {
+                        // No template selected, use detected mappings only
+                        const detected = {};
+                        Object.keys(uploadResponseData.detected_mappings || {}).forEach(cin7Field => {
+                          // Exclude Location and ProductName - we don't need to capture those
+                          if (cin7Field === 'Location' || cin7Field === 'ProductName') {
+                            return;
+                          }
+                          const matches = uploadResponseData.detected_mappings[cin7Field];
+                          if (matches && matches.length > 0) {
+                            detected[cin7Field] = matches[0];
+                          }
+                        });
+                        setPreviewMapping(detected);
+                      }
+                    }}
+                  >
+                    <SelectTrigger id="template-select" className="w-[400px]">
+                      <SelectValue placeholder="Select a template (or use detected mapping)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Use Detected Mapping Only</SelectItem>
+                      {uploadResponseData.templates?.map(template => (
+                        <SelectItem key={template.id} value={template.id}>
+                          {template.name} {template.is_default && '(Default)'}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Mapping Preview */}
+                <div className="space-y-2">
+                  <Label>Mapping Preview</Label>
+                  <div className="border rounded-lg overflow-hidden">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="h-7">
+                          <TableHead className="w-[240px] text-xs py-1">Cin7 Field</TableHead>
+                          <TableHead className="w-[180px] text-xs py-1">CSV Column</TableHead>
+                          <TableHead className="w-[80px] text-xs py-1 text-left">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {(() => {
+                          // Show all common Cin7 fields (excluding app-only fields like SaleOrderNumber)
+                          const commonFields = [
+                            { field: 'CustomerName', label: 'Customer Name', required: true },
+                            { field: 'CustomerReference', label: 'Customer Reference (PO)', required: true },
+                            { field: 'SaleDate', label: 'Sale Date', required: true },
+                            { field: 'ShipBy', label: 'Required By / Due Date', required: true },
+                            { field: 'SKU', label: 'Product SKU', required: true },
+                            { field: 'Quantity', label: 'Quantity', required: true },
+                            { field: 'Price', label: 'Price', required: true },
+                          ];
+                          
+                          return commonFields.map(({ field, label, required }) => {
+                            const csvColumn = previewMapping[field];
+                            return (
+                              <TableRow key={field} className="h-9">
+                                <TableCell className="py-1.5">
+                                  <span className="text-xs font-medium">
+                                    {label}
+                                    {required && <span className="text-red-500 ml-1">*</span>}
+                                  </span>
+                                </TableCell>
+                                <TableCell className="py-1.5">
+                                  <Select
+                                    value={csvColumn || 'none'}
+                                    onValueChange={(value) => {
+                                      const newMapping = { ...previewMapping };
+                                      if (value === 'none') {
+                                        delete newMapping[field];
+                                      } else {
+                                        newMapping[field] = value;
+                                      }
+                                      setPreviewMapping(newMapping);
+                                    }}
+                                  >
+                                    <SelectTrigger className="h-7 text-xs w-[200px]">
+                                      <SelectValue placeholder="Select column" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="none">-- Not mapped --</SelectItem>
+                                      {uploadResponseData.csv_columns?.filter(col => col).map(col => (
+                                        <SelectItem key={col} value={col}>
+                                          {col}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </TableCell>
+                                <TableCell className="py-1.5 text-left">
+                                  {csvColumn ? (
+                                    <Badge variant="default" className="text-[10px] px-1.5 py-0 h-5">Mapped</Badge>
+                                  ) : required ? (
+                                    <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-5">Required</Badge>
+                                  ) : (
+                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5">Optional</Badge>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          });
+                        })()}
+                      </TableBody>
+                    </Table>
                   </div>
                 </div>
-                
-                <div className="space-y-2">
-                  <Label className="text-sm font-medium">Unique Orders</Label>
-                  <div className="p-2 bg-muted rounded-md">
-                    <span className="text-sm font-medium">
-                      {csvUniqueOrderCount > 0 ? (
-                        <>{csvUniqueOrderCount.toLocaleString()} {csvUniqueOrderCount === 1 ? 'order' : 'orders'}</>
-                      ) : (
-                        <span className="text-muted-foreground">Unable to detect order column</span>
-                      )}
-                    </span>
+
+                {/* Sample Data Preview */}
+                {previewCsvRows.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>Sample Data Preview (First Row)</Label>
+                    <div className="border rounded-lg overflow-auto max-h-[300px]">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="h-7">
+                            <TableHead className="text-xs py-1">CSV Column</TableHead>
+                            <TableHead className="text-xs py-1">Value</TableHead>
+                            <TableHead className="text-xs py-1">Maps To</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {uploadResponseData.csv_columns?.filter(col => col).map(csvCol => {
+                            const cin7Field = Object.keys(previewMapping).find(
+                              field => previewMapping[field] === csvCol
+                            );
+                            const value = previewCsvRows[0]?.data?.[csvCol] || '';
+                            return (
+                              <TableRow key={csvCol}>
+                                <TableCell className="font-medium">{csvCol}</TableCell>
+                                <TableCell className="max-w-[200px] truncate" title={value}>
+                                  {value || <span className="text-muted-foreground">Empty</span>}
+                                </TableCell>
+                                <TableCell>
+                                  {cin7Field ? (
+                                    cin7Field === 'SaleOrderNumber' ? (
+                                      <div className="flex items-center gap-1">
+                                        <Badge variant="outline" className="text-xs">{cin7Field}</Badge>
+                                        <span className="text-[10px] text-muted-foreground italic">(App only)</span>
+                                      </div>
+                                    ) : (
+                                      <Badge variant="default" className="text-xs">{cin7Field}</Badge>
+                                    )
+                                  ) : (
+                                    <span className="text-muted-foreground text-sm">Unmapped</span>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {autoCreateEnabled && (
                   <div className="p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-md">
@@ -3534,13 +3763,43 @@ const QueueView = () => {
                   </div>
                 )}
               </>
-            )}
+            ) : null}
           </div>
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2 pt-4 border-t">
             <Button variant="outline" onClick={handleCancelUpload} disabled={loadingAutoCreateStatus}>
               Cancel
             </Button>
-            <Button onClick={handleConfirmUpload} disabled={loadingAutoCreateStatus || !pendingFile}>
+            <Button 
+              disabled={(() => {
+                // Check if all required fields are mapped
+                const requiredFields = ['CustomerName', 'CustomerReference', 'SaleDate', 'ShipBy', 'SKU', 'Quantity', 'Price'];
+                const allRequiredMapped = requiredFields.every(field => previewMapping[field]);
+                return !allRequiredMapped || loadingAutoCreateStatus || !pendingFile || !uploadResponseData;
+              })()}
+              onClick={async () => {
+                if (!pendingFile || !uploadResponseData) return;
+                
+                // Save the selected mapping to the session
+                if (uploadResponseData.session_id) {
+                  try {
+                    await axios.post('/sales/mapping', {
+                      session_id: uploadResponseData.session_id,
+                      column_mapping: previewMapping
+                    });
+                  } catch (error) {
+                    console.error('Failed to save mapping:', error);
+                  }
+                }
+                
+                // Proceed with webhook upload
+                setUploadConfirmModalOpen(false);
+                handleFileUpload(pendingFile);
+                setPendingFile(null);
+                setUploadResponseData(null);
+                setSelectedTemplateId(null);
+                setPreviewMapping({});
+              }}
+            >
               {loadingAutoCreateStatus ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-2" />

@@ -78,15 +78,6 @@ def test_upload_with_auto_create():
         print(f"\n2. Loaded test CSV: {filename}")
         print(f"   File size: {len(csv_content)} bytes")
         
-        # Import the sales route functions
-        from routes.sales import upload_csv, validate_data, create_sales_orders
-        
-        # Create a mock request context
-        from flask import Flask, request
-        from flask_jwt_extended import create_access_token
-        
-        # We need to simulate the full flow, so let's use the actual endpoints
-        # But first, let's check what user/client to use
         print(f"\n3. Setting up test context...")
         
         print(f"\n4. Analyzing CSV structure...")

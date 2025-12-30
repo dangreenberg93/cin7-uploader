@@ -675,13 +675,6 @@ class Cin7SalesAPI:
         Returns:
             Company data or None
         """
-        import sys
-        print(f"DEBUG get_company: logger_callback is {'SET' if self.logger_callback else 'NOT SET'}", file=sys.stderr, flush=True)
-        if self.logger_callback:
-            print(f"DEBUG get_company: logger_callback type: {type(self.logger_callback)}", file=sys.stderr, flush=True)
-        else:
-            print(f"DEBUG get_company: logger_callback is NOT SET - API call will NOT be logged!", file=sys.stderr, flush=True)
-            print(f"DEBUG get_company: self.logger_callback value: {self.logger_callback}", file=sys.stderr, flush=True)
         self._rate_limit()
         url = f"{self.base_url}/me"
         endpoint = "/me"
@@ -705,13 +698,9 @@ class Cin7SalesAPI:
             
             # IMPORTANT: Call logger_callback BEFORE returning, regardless of status code
             # This ensures the API call is always logged
-            import sys
             if self.logger_callback:
                 safe_headers = {k: v for k, v in dict(self.session.headers).items() 
                               if k.lower() not in ['api-auth-applicationkey', 'authorization']}
-                print(f"DEBUG: About to call logger_callback for {method} {endpoint} (get_company)", file=sys.stderr, flush=True)
-                print(f"DEBUG: logger_callback type: {type(self.logger_callback)}", file=sys.stderr, flush=True)
-                print(f"DEBUG: logger_callback is callable: {callable(self.logger_callback)}", file=sys.stderr, flush=True)
                 try:
                     self.logger_callback(
                         endpoint=endpoint,
@@ -724,14 +713,9 @@ class Cin7SalesAPI:
                         error_message=error_message,
                         duration_ms=duration_ms
                     )
-                    print(f"DEBUG: logger_callback completed for {method} {endpoint}", file=sys.stderr, flush=True)
-                except Exception as callback_error:
-                    print(f"DEBUG: ERROR in logger_callback: {str(callback_error)}", file=sys.stderr, flush=True)
-                    import traceback
-                    print(traceback.format_exc(), file=sys.stderr, flush=True)
-            else:
-                print(f"DEBUG: No logger_callback set for {method} {endpoint} - API call will NOT be logged!", file=sys.stderr, flush=True)
-                print(f"DEBUG: self.logger_callback value: {self.logger_callback}", file=sys.stderr, flush=True)
+                except Exception:
+                    # Silently ignore logger_callback errors to avoid breaking the main flow
+                    pass
             
             if response.status_code == 200:
                 # Check if response is actually valid JSON (not HTML error page)
@@ -786,8 +770,6 @@ class Cin7SalesAPI:
         
         import sys
         print(f"\n{'='*60}", file=sys.stderr)
-        print(f"DEBUG get_accounts: Making API call to {url}", file=sys.stderr)
-        print(f"DEBUG get_accounts: Method: {method}", file=sys.stderr)
         
         try:
             response = self.session.get(url, params=params, timeout=30)
@@ -835,48 +817,19 @@ class Cin7SalesAPI:
                 
                 # Check for HTML error page
                 if isinstance(data, str) and '<!DOCTYPE html>' in data:
-                    import sys
-                    print(f"DEBUG get_accounts: Received HTML error page", file=sys.stderr)
-                    print(f"{'='*60}\n", file=sys.stderr)
                     return []
-                
-                # Debug: print response structure (similar to locations)
-                import sys
-                raw_response_text = response.text[:500] if hasattr(response, 'text') else None
-                print(f"DEBUG get_accounts: Response status 200, data type: {type(data)}", file=sys.stderr)
-                print(f"DEBUG get_accounts: Response data: {data}", file=sys.stderr)
-                print(f"DEBUG get_accounts: Raw response text (first 500 chars): {raw_response_text}", file=sys.stderr)
-                print(f"DEBUG get_accounts: Response data keys (if dict): {list(data.keys()) if isinstance(data, dict) else 'N/A'}", file=sys.stderr)
                 
                 # Extract accounts from response (similar to LocationList pattern)
                 accounts = []
                 if isinstance(data, list):
-                    print(f"DEBUG get_accounts: Data is a list with {len(data)} items", file=sys.stderr)
-                    print(f"{'='*60}\n", file=sys.stderr)
                     return data
                 elif isinstance(data, dict):
-                    print(f"DEBUG get_accounts: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
                     # Use AccountsList (the actual key from API response)
                     accounts = data.get('AccountsList', [])
-                    print(f"DEBUG get_accounts: Extracted {len(accounts) if accounts else 0} accounts from AccountsList", file=sys.stderr)
                     if isinstance(accounts, list):
-                        print(f"DEBUG get_accounts: Returning {len(accounts)} accounts", file=sys.stderr)
-                        print(f"{'='*60}\n", file=sys.stderr)
                         return accounts
                     elif isinstance(accounts, dict):
-                        print(f"DEBUG get_accounts: Single account object, wrapping in list", file=sys.stderr)
-                        print(f"{'='*60}\n", file=sys.stderr)
                         return [accounts]
-                else:
-                    print(f"DEBUG get_accounts: Unexpected data type: {type(data)}", file=sys.stderr)
-            else:
-                import sys
-                print(f"DEBUG get_accounts: Non-200 status: {response.status_code}", file=sys.stderr)
-                print(f"DEBUG get_accounts: Response text: {response.text[:200] if response.text else 'None'}", file=sys.stderr)
-            import sys
-            print(f"DEBUG get_accounts: Returning empty list", file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
-            return []
             return []
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
@@ -921,8 +874,6 @@ class Cin7SalesAPI:
         
         import sys
         print(f"\n{'='*60}", file=sys.stderr)
-        print(f"DEBUG get_tax_rules: Making API call to {url}", file=sys.stderr)
-        print(f"DEBUG get_tax_rules: Method: {method}", file=sys.stderr)
         
         try:
             response = self.session.get(url, params=params, timeout=30)
@@ -970,49 +921,19 @@ class Cin7SalesAPI:
                 
                 # Check for HTML error page
                 if isinstance(data, str) and '<!DOCTYPE html>' in data:
-                    import sys
-                    print(f"DEBUG get_tax_rules: Received HTML error page", file=sys.stderr)
-                    print(f"{'='*60}\n", file=sys.stderr)
                     return []
-                
-                # Debug: print response structure (similar to locations)
-                import sys
-                raw_response_text = response.text[:500] if hasattr(response, 'text') else None
-                print(f"DEBUG get_tax_rules: Response status 200, data type: {type(data)}", file=sys.stderr)
-                print(f"DEBUG get_tax_rules: Response data: {data}", file=sys.stderr)
-                print(f"DEBUG get_tax_rules: Raw response text (first 500 chars): {raw_response_text}", file=sys.stderr)
-                print(f"DEBUG get_tax_rules: Response data keys (if dict): {list(data.keys()) if isinstance(data, dict) else 'N/A'}", file=sys.stderr)
                 
                 # Extract tax rules from response (similar to LocationList pattern)
                 tax_rules = []
                 if isinstance(data, list):
-                    print(f"DEBUG get_tax_rules: Data is a list with {len(data)} items", file=sys.stderr)
-                    print(f"{'='*60}\n", file=sys.stderr)
                     return data
                 elif isinstance(data, dict):
-                    print(f"DEBUG get_tax_rules: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
                     # Use TaxRuleList (the actual key from API response)
                     tax_rules = data.get('TaxRuleList', [])
-                    print(f"DEBUG get_tax_rules: Extracted {len(tax_rules) if tax_rules else 0} tax rules from TaxRuleList", file=sys.stderr)
                     if isinstance(tax_rules, list):
-                        print(f"DEBUG get_tax_rules: Returning {len(tax_rules)} tax rules", file=sys.stderr)
-                        print(f"{'='*60}\n", file=sys.stderr)
                         return tax_rules
                     elif isinstance(tax_rules, dict):
-                        print(f"DEBUG get_tax_rules: Single tax rule object, wrapping in list", file=sys.stderr)
-                        print(f"{'='*60}\n", file=sys.stderr)
                         return [tax_rules]
-                else:
-                    import sys
-                    print(f"DEBUG get_tax_rules: Unexpected data type: {type(data)}", file=sys.stderr)
-            else:
-                import sys
-                print(f"DEBUG get_tax_rules: Non-200 status: {response.status_code}", file=sys.stderr)
-                print(f"DEBUG get_tax_rules: Response text: {response.text[:200] if response.text else 'None'}", file=sys.stderr)
-            import sys
-            print(f"DEBUG get_tax_rules: Returning empty list", file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
-            return []
             return []
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
@@ -1096,30 +1017,18 @@ class Cin7SalesAPI:
                 data = response_body if response_body else {}
                 # Check for HTML error page
                 if isinstance(data, str) and '<!DOCTYPE html>' in data:
-                    import sys
-                    print(f"DEBUG get_attribute_sets: Received HTML error page", file=sys.stderr)
                     return []
-                
-                # Debug: print response structure (similar to locations)
-                import sys
-                print(f"DEBUG get_attribute_sets: Response status: {response.status_code}", file=sys.stderr)
-                print(f"DEBUG get_attribute_sets: Data type: {type(data)}", file=sys.stderr)
                 
                 # Extract attribute sets from response (similar to LocationList pattern)
                 attribute_sets = []
                 if isinstance(data, list):
-                    print(f"DEBUG get_attribute_sets: Data is a list with {len(data)} items", file=sys.stderr)
                     attribute_sets = data
                 elif isinstance(data, dict):
-                    print(f"DEBUG get_attribute_sets: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
                     # Use AttributeSetList (the actual key from API response)
                     attribute_sets = data.get('AttributeSetList', [])
-                    print(f"DEBUG get_attribute_sets: Extracted {len(attribute_sets) if attribute_sets else 0} attribute sets from AttributeSetList", file=sys.stderr)
                 
                 if isinstance(attribute_sets, list):
-                    print(f"DEBUG get_attribute_sets: Returning {len(attribute_sets)} attribute sets", file=sys.stderr)
                     return attribute_sets
-                return []
             return []
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
@@ -1164,15 +1073,8 @@ class Cin7SalesAPI:
         }
         start_time = time.time()
         
-        import sys
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"DEBUG get_locations: Making API call to {url}", file=sys.stderr)
-        print(f"DEBUG get_locations: Method: {method}", file=sys.stderr)
-        print(f"DEBUG get_locations: Headers (sanitized): api-auth-accountid={self.account_id[:8]}..., api-auth-applicationkey=***", file=sys.stderr)
-        
         try:
             response = self.session.get(url, params=params, timeout=30)
-            print(f"DEBUG get_locations: Response status: {response.status_code}", file=sys.stderr)
             duration_ms = int((time.time() - start_time) * 1000)
             
             # Log the API call
@@ -1215,39 +1117,17 @@ class Cin7SalesAPI:
                 }
                 self._last_location_raw_data = data
                 
-                # Also capture raw response text for debugging
-                raw_response_text = response.text[:500] if hasattr(response, 'text') else None
-                print(f"DEBUG get_locations: Response status 200, data type: {type(data)}", file=sys.stderr)
-                print(f"DEBUG get_locations: Response data: {data}", file=sys.stderr)
-                print(f"DEBUG get_locations: Raw response text (first 500 chars): {raw_response_text}", file=sys.stderr)
-                print(f"DEBUG get_locations: Response data keys (if dict): {list(data.keys()) if isinstance(data, dict) else 'N/A'}", file=sys.stderr)
-                
                 # API returns locations in a dict with LocationList key (similar to CustomerList)
                 if isinstance(data, list):
-                    print(f"DEBUG get_locations: Data is a list with {len(data)} items", file=sys.stderr)
-                    print(f"{'='*60}\n", file=sys.stderr)
                     return data
                 elif isinstance(data, dict):
-                    print(f"DEBUG get_locations: Data is a dict with keys: {list(data.keys())}", file=sys.stderr)
                     # Cin7 API returns locations in LocationList key
                     locations = data.get('LocationList', [])
-                    print(f"DEBUG get_locations: Extracted {len(locations) if locations else 0} locations from LocationList", file=sys.stderr)
                     if isinstance(locations, list):
-                        print(f"DEBUG get_locations: Returning {len(locations)} locations", file=sys.stderr)
-                        print(f"{'='*60}\n", file=sys.stderr)
                         return locations
                     # If it's a single location object, wrap it in a list
                     elif isinstance(locations, dict):
-                        print(f"DEBUG get_locations: Single location object, wrapping in list", file=sys.stderr)
-                        print(f"{'='*60}\n", file=sys.stderr)
                         return [locations]
-                else:
-                    print(f"DEBUG get_locations: Unexpected data type: {type(data)}", file=sys.stderr)
-            else:
-                print(f"DEBUG get_locations: Non-200 status: {response.status_code}", file=sys.stderr)
-                print(f"DEBUG get_locations: Response text: {response.text[:200] if response.text else 'None'}", file=sys.stderr)
-            print(f"DEBUG get_locations: Returning empty list", file=sys.stderr)
-            print(f"{'='*60}\n", file=sys.stderr)
             return []
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
@@ -1313,10 +1193,6 @@ class Cin7SalesAPI:
         Returns:
             List of all customers
         """
-        if self.logger_callback:
-            print(f"DEBUG get_all_customers: logger_callback is SET")
-        else:
-            print(f"DEBUG get_all_customers: logger_callback is NOT SET - API calls will not be logged!")
         self._rate_limit()
         url = f"{self.base_url}/customer"
         endpoint = "/customer"
